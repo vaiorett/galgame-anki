@@ -6,7 +6,6 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, QThreadPool, Signal
 from PySide6.QtWidgets import (
-    QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog,
@@ -22,7 +21,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from galgame_anki.adapters.audio_recorder import play_mp3_bytes_async
+from galgame_anki.adapters.media_utils import play_mp3_bytes_async
 from galgame_anki.adapters.xp3_psb import cached_formats_dat_path
 from galgame_anki.config import AppConfig
 from galgame_anki.core.voice_pack import MatchedVoiceResult, VoicePackManager, VoicePackSummary
@@ -59,16 +58,11 @@ class VoicePackDialog(QDialog):
         layout.setSpacing(10)
 
         intro = QLabel(
-            "<b>告別錄音混入 BGM 與音效！</b> 直接從遊戲本體 <code>.xp3</code> 封包（免拆滿硬碟，支援 <b>ATRI 等 Kirikiri CxDec</b>）"
-            "或 GARbro/FreeMote 已解包資料夾建立「<b>台詞 ↔ 純淨人聲</b>」索引。製卡與試聽時自動抽出 100% 無背景音聲優原聲！"
+            "<b>100% 無背景音樂・無音效純淨人聲！</b> 直接從遊戲本體 <code>.xp3</code> 封包（免拆滿硬碟，支援 <b>ATRI 等 Kirikiri CxDec</b>）"
+            "或 GARbro/FreeMote 已解包資料夾建立「<b>台詞 ↔ 純淨人聲</b>」索引。製卡與試聽時自動抽出聲優原聲！"
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
-
-        self.prefer_chk = QCheckBox("✨ 優先從已索引遊戲抽取純淨原包人聲（遇到無配音旁白不誤錄 BGM；僅未命中時才改用系統錄音）")
-        self.prefer_chk.setChecked(self.config.prefer_voice_pack_over_recorder)
-        self.prefer_chk.toggled.connect(self._on_prefer_toggled)
-        layout.addWidget(self.prefer_chk)
 
         # === 區塊 1：新增 / 更新遊戲索引 ===
         add_box = QFrame()
@@ -225,10 +219,6 @@ class VoicePackDialog(QDialog):
         if not parts:
             parts.append("此目錄未直接掃到 .xp3 或劇本/語音，請確認選到遊戲安裝根目錄。")
         self.detect_label.setText("🔍 " + " ｜ ".join(parts))
-
-    def _on_prefer_toggled(self, checked: bool) -> None:
-        self.config.prefer_voice_pack_over_recorder = checked
-        self.config.save()
 
     def _start_indexing(self) -> None:
         p = Path(self.dir_edit.text().strip())

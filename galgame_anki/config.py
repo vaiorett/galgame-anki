@@ -66,13 +66,10 @@ class AppConfig:
     wine_locale: str = "ja_JP.UTF-8"
     recent_games: list[dict[str, str]] = field(default_factory=list)
 
-    # 媒體擷取與 Refold 精煉製卡（自動錄製遊戲／影片聲優原聲＋當下畫面 CG 寫入 Anki）
+    # 媒體擷取與 Refold 精煉製卡（從遊戲解包提取純淨聲優原聲／mpv 原聲＋當下畫面 CG 寫入 Anki）
     capture_audio_on_mine: bool = True
-    audio_pre_pad_ms: int = 350
-    audio_max_seconds: int = 11
     capture_screenshot_on_mine: bool = True
     quick_forge_before_mine: bool = True
-    prefer_voice_pack_over_recorder: bool = True  # 優先使用遊戲解包／XP3 直讀純淨人聲（0% BGM/音效）
     active_voice_pack_id: str = ""                # 可手動指定目前優先使用的人聲索引包（空字串＝自動依遊戲配對）
 
     # 輕量二次元 UI 與電影級固定覆蓋層

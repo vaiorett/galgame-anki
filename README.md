@@ -13,8 +13,7 @@
 | **🎮 Galgame & mpv 字幕擷取** | 一鍵日區啟動 Wine 遊戲並自動注入 `TextractorCLI`（自動消重與漸進前綴修復）；完整支援 **Flatpak `io.mpv.Mpv`** 與原生 `mpv` IPC 字幕串流（自動隱藏原字幕）；內建 `Ctrl+Shift+O` 區域 OCR 兜底。 |
 | **🪟 置頂遮蓋替換覆蓋層** | 預設 **🎭 遮蓋替換模式**（100% 不透明深黑／暖白／純黑底色直接覆蓋遊戲原字，絕不看兩份字幕）、**📌 KDE Wayland KWin 原生置頂**、固定尺寸零跳動、平時零按鈕、滑鼠懸停即查詞（Yomitan 風格）。 |
 | **🧠 4 層日語 NLP 語境釋義** | Janome（MeCab IPADIC）詞形詞性還原 ＋ 口語活用合併 ＋ 高頻口語詞表 ＋ 詞頻消歧義，精準還原口語活用（如 `わかった → 明白了`），支援 Yomitan `.zip` 詞典管理、單獨開關與優先序調整。 |
-| **🎙 原聲語音 ＋ 畫面 CG 精煉製卡** | `parec` 240 秒環形錄音緩衝 + VAD 靜音裁切 + mpv FFmpeg 無損抽音抽幀 + KDE `spectacle` 靜默截圖。經 **1 秒 Refold 精煉確認窗**選取單一核心意思後寫入 Anki（嚴格繼承原生主題，支援 Lv.1→Lv.2→Lv.3 模板）。 |
-| **📦 遊戲解包純淨人聲 (0% BGM)** | 免拆滿硬碟直讀 Kirikiri `.xp3`（支援 **ATRI 等 CxDec** ＋ M2 `.scn` PSB）與已解包資料夾，建立「**台詞 ↔ 聲優原聲**」SQLite 索引。試聽／製卡抽出 **0% BGM・0% 音效** 純人聲（旁白不誤錄 BGM），亦支援一鍵實體匯出。 |
+| **📦 遊戲解包純淨人聲 ＋ 畫面 CG 精煉製卡** | 免拆滿硬碟直讀 Kirikiri `.xp3`（支援 **ATRI 等 CxDec** ＋ M2 `.scn` PSB）與已解包資料夾，建立「**台詞 ↔ 聲優原聲**」SQLite 索引並抽出 **0% BGM・0% 音效** 純淨原聲；支援 mpv FFmpeg 無損抽音抽幀 ＋ KDE `spectacle` 截圖，經 **1 秒 Refold 精煉確認窗**寫入 Anki。 |
 | **🗺️ 離線 N5→N1 系統學習藍圖** | 內建 51 條 N5→N1 核心句型、18 個助詞白話角色、日語語序直譯骨架、30 秒詞典／活用速查表，邊玩邊點亮已遇見語法；另附 **📋 問 Gemini/GPT** 一鍵複製提問詞。 |
 
 ---
@@ -24,7 +23,7 @@
 ### 1. 環境需求（Fedora / Linux）
 - Python 3.10+、`PySide6`、`janome`
 - Anki（含 [AnkiConnect](https://ankiweb.net/shared/info/2055492159) `2055492159`，建議於牌組選項啟用 **FSRS**）
-- 選配：`wine`（Galgame）、`mpv` 或 Flatpak `io.mpv.Mpv`（動畫）、`ffmpeg` + `parec`（錄音）、`spectacle`（KDE 截圖）、`tesseract`（OCR）
+- 選配：`wine`（Galgame）、`mpv` 或 Flatpak `io.mpv.Mpv`（動畫）、`ffmpeg`（純人聲轉 MP3 與影片切音抽幀）、`spectacle`（KDE 截圖）、`tesseract`（OCR）
 
 ```bash
 pip install --user PySide6 janome
@@ -42,7 +41,7 @@ chmod +x run.sh install-desktop.sh
 ### 3. 命令列工具（選用）
 ```bash
 ./run.sh              # 啟動主程式
-./run.sh --diagnose   # 檢查 Wayland / Wine / Anki / mpv / 錄音環境
+./run.sh --diagnose   # 檢查 Wayland / Wine / Anki / mpv / FFmpeg 環境
 ./run.sh --init-anki  # 一鍵同步 Anki 牌組與三階段原生主題模板
 ./run.sh --demo       # 載入攻略範例句試玩
 ```
@@ -69,7 +68,7 @@ galgame-anki/
 │   ├── main.py                # CLI 與 GUI 啟動入口
 │   ├── config.py              # 設定持久化 (~/.config/galgame-anki/config.json)
 │   ├── core/                  # 分詞、活用還原、SQLite 詞典、語境釋義、純人聲包索引、離線語法、AnkiConnect
-│   ├── adapters/              # Textractor Hook、XP3+CxDec/PSB 解析、mpv IPC、Wayland 置頂、錄音、OCR、截圖
+│   ├── adapters/              # Textractor Hook、XP3+CxDec/PSB 解析、mpv IPC、Wayland 置頂、FFmpeg 媒體、OCR、截圖
 │   ├── ui/                    # 主視窗、置頂遮蓋覆蓋層、純人聲解包管理、查詞浮窗、Refold 製卡窗、學習藍圖
 │   └── data/                  # 高頻口語詞表、N5→N1 語法藍圖、基礎詞典與應用圖示
 ├── tests/                     # 單元與 PySide6 Offscreen GUI 自動化測試

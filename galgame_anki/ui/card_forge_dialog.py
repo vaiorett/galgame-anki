@@ -3,8 +3,8 @@
 拒絕把整頁大字典硬搬進 Anki！
 1 秒內讓你確認：
 1. 這句話裡真正對應的「1 條精煉核心意思」（提供一鍵切換義項膠囊，也可直接用自己的話改寫）
-2. 「先理解整句」：可一鍵核對自然中文句意，確保不記憶看不懂的東西
-3. 「音畫情景記憶」：自動附帶聲優原聲（支援試聽＋一鍵 4 秒補錄）與當下遊戲／動畫 CG 截圖縮圖
+2. 「先理解整句」：可一鍵核對自然中文句意或直接帶入遊戲解包雙語台詞，確保不記憶看不懂的東西
+3. 「音畫情景記憶」：自動附帶遊戲解包純淨聲優原聲／mpv 影片原聲與當下畫面 CG 截圖縮圖
 4. 嚴格還原攻略三階段（Lv.1 讀音破冰 / Lv.2 1T 音畫語境 / Lv.3 日日單語）
 """
 
@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from galgame_anki.adapters.audio_recorder import play_mp3_bytes_async
+from galgame_anki.adapters.media_utils import play_mp3_bytes_async
 from galgame_anki.core.context_meaning import rank_senses_by_context
 from galgame_anki.core.grammar_engine import translate_sentence_free
 from galgame_anki.ui.workers import FunctionWorker
@@ -72,7 +72,6 @@ class CardForgeDialog(QDialog):
         include_audio_default: bool,
         include_screenshot_default: bool,
         thread_pool: QThreadPool,
-        manual_record_fn: Callable[[], tuple[bytes, str] | None] | None = None,
         capture_shot_fn: Callable[[], tuple[bytes, str] | None] | None = None,
         alt_lemmas: list[tuple[str, str, str, str]] | None = None,
         audio_source: str = "",
@@ -93,7 +92,6 @@ class CardForgeDialog(QDialog):
         self._pack_translation = pack_translation
         self._screenshot_clip = screenshot_clip
         self._thread_pool = thread_pool
-        self._manual_record_fn = manual_record_fn
         self._capture_shot_fn = capture_shot_fn
         self._workers: list[object] = []
         self.result_data: ForgedCardData | None = None
@@ -272,12 +270,6 @@ class CardForgeDialog(QDialog):
         self.play_btn = QPushButton("▶ 試聽")
         self.play_btn.clicked.connect(self._play_audio)
         aud_btns.addWidget(self.play_btn)
-
-        self.rerecord_btn = QPushButton("⏺ 補錄 4 秒")
-        self.rerecord_btn.setToolTip("按下後點一下遊戲裡的「重播語音」按鈕，即可重新錄下清晰聲優原聲！")
-        self.rerecord_btn.setEnabled(self._manual_record_fn is not None)
-        self.rerecord_btn.clicked.connect(self._rerecord_audio)
-        aud_btns.addWidget(self.rerecord_btn)
         aud_btns.addStretch()
         aud_col.addLayout(aud_btns)
         ml.addLayout(aud_col, 1)
@@ -340,12 +332,10 @@ class CardForgeDialog(QDialog):
                 self.audio_status_lbl.setText(f"✅ 原聲已就緒（{len(mp3_bytes) / 1024:.1f} KB · 可先試聽）")
             self.play_btn.setEnabled(True)
         elif self._audio_source == "silent":
-            self.audio_status_lbl.setText(
-                "🔇 劇本確認本句為旁白／無配音（已略過背景音樂，若實際有語音可點「⏺ 補錄 4 秒」）"
-            )
+            self.audio_status_lbl.setText("🔇 劇本確認本句為旁白／無配音角色")
             self.play_btn.setEnabled(False)
         else:
-            self.audio_status_lbl.setText("⚠ 尚未捕獲此句人聲（可能為無配音旁白，可按「⏺ 補錄 4 秒」再點遊戲語音重播鈕）")
+            self.audio_status_lbl.setText("⚠ 未找到此句純淨人聲（可至「📦 遊戲解包純淨人聲」建立遊戲索引，或本句無語音）")
             self.play_btn.setEnabled(False)
 
     def _refresh_shot_ui(self) -> None:
@@ -366,29 +356,6 @@ class CardForgeDialog(QDialog):
     def _play_audio(self) -> None:
         if self._audio_clip:
             play_mp3_bytes_async(self._audio_clip[0])
-
-    def _rerecord_audio(self) -> None:
-        if not self._manual_record_fn:
-            return
-        self.rerecord_btn.setEnabled(False)
-        self.audio_status_lbl.setText("🔴 正在錄音 4 秒…請立刻點遊戲裡的「重播語音」按鈕！")
-        worker = FunctionWorker(self._manual_record_fn)
-        worker.signals.finished.connect(self._on_rerecord_done)
-        worker.signals.failed.connect(self._on_rerecord_fail)
-        self._workers.append(worker)
-        self._thread_pool.start(worker)
-
-    def _on_rerecord_done(self, clip: tuple[bytes, str] | None) -> None:
-        self.rerecord_btn.setEnabled(True)
-        if clip:
-            self._audio_clip = clip
-            self._audio_source = "manual"
-            self.include_audio_chk.setChecked(True)
-        self._refresh_audio_ui()
-
-    def _on_rerecord_fail(self, err: str) -> None:
-        self.rerecord_btn.setEnabled(True)
-        self.audio_status_lbl.setText(f"補錄失敗：{err}")
 
     def _recapture_shot(self) -> None:
         if not self._capture_shot_fn:

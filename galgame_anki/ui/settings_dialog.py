@@ -1,4 +1,4 @@
-"""設定視窗（Anki、原聲語音、二次元主題與 Hook / 影片 / Wine 啟動）。"""
+"""設定視窗（Anki、純淨人聲、二次元主題與 Hook / 影片 / Wine 啟動）。"""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from galgame_anki.config import AppConfig
 
 
 class SettingsDialog(QDialog):
-    """集中管理 Anki、語音錄製、Hook / 字幕監聽與 Wine 日區參數（零付費 API）。"""
+    """集中管理 Anki、純淨人聲、Hook / 字幕監聽與 Wine 日區參數（零付費 API）。"""
 
     def __init__(
         self,
@@ -71,18 +71,8 @@ class SettingsDialog(QDialog):
         self.auto_sync_chk = QCheckBox("啟動時自動同步 Anki 已有詞彙（啟用 1T 句子高亮與防重）")
         af.addRow(self.auto_sync_chk)
 
-        self.audio_chk = QCheckBox("一鍵製卡時自動錄入遊戲／影片原聲語音 (.mp3 寫入 SentenceAudio)")
+        self.audio_chk = QCheckBox("一鍵製卡時自動附帶遊戲原包純淨人聲 / mpv 影片原聲 (.mp3 寫入 SentenceAudio)")
         af.addRow(self.audio_chk)
-
-        self.audio_pad_spin = QSpinBox()
-        self.audio_pad_spin.setRange(0, 1500)
-        self.audio_pad_spin.setSuffix(" ms")
-        af.addRow("語音開頭提前緩衝：", self.audio_pad_spin)
-
-        self.audio_max_spin = QSpinBox()
-        self.audio_max_spin.setRange(3, 30)
-        self.audio_max_spin.setSuffix(" 秒")
-        af.addRow("單句語音最長擷取：", self.audio_max_spin)
 
         self.screenshot_chk = QCheckBox("一鍵製卡時自動附帶當下遊戲／動畫 CG 畫面截圖（音畫情景記憶）")
         af.addRow(self.screenshot_chk)
@@ -152,8 +142,6 @@ class SettingsDialog(QDialog):
             self.dict_mode_combo.setCurrentIndex(idx)
         self.auto_sync_chk.setChecked(c.auto_sync_known_words)
         self.audio_chk.setChecked(c.capture_audio_on_mine)
-        self.audio_pad_spin.setValue(c.audio_pre_pad_ms)
-        self.audio_max_spin.setValue(c.audio_max_seconds)
         self.screenshot_chk.setChecked(c.capture_screenshot_on_mine)
         self.forge_chk.setChecked(c.quick_forge_before_mine)
         t_idx = self.theme_combo.findData(c.ui_theme)
@@ -177,8 +165,6 @@ class SettingsDialog(QDialog):
         c.dict_mode = str(self.dict_mode_combo.currentData() or "auto")
         c.auto_sync_known_words = self.auto_sync_chk.isChecked()
         c.capture_audio_on_mine = self.audio_chk.isChecked()
-        c.audio_pre_pad_ms = self.audio_pad_spin.value()
-        c.audio_max_seconds = self.audio_max_spin.value()
         c.capture_screenshot_on_mine = self.screenshot_chk.isChecked()
         c.quick_forge_before_mine = self.forge_chk.isChecked()
         c.ui_theme = str(self.theme_combo.currentData() or "sakura")

@@ -113,6 +113,13 @@ class TestDictionaryAndTokenizer(unittest.TestCase):
         highlighted = highlight_target_in_sentence(sent, one_t_tokens[0].start, one_t_tokens[0].end)
         self.assertEqual(highlighted, "外の世界を知りたいという想いは、【募る】一方だ")
 
+    def test_repeated_target_counts_once(self) -> None:
+        sentence = self.tokenizer.tokenize("世界、世界。")
+        self.assertEqual(sentence.unknown_count, 1)
+        self.assertEqual([t.start for t in sentence.tokens if t.is_1t_candidate], [0, 3])
+        self.assertFalse(self.tokenizer.tokenize("世界、世界。", {"世界"}).is_1t_sentence)
+        self.assertFalse(self.tokenizer.tokenize("世界、世界、想い。").is_1t_sentence)
+
     def test_ruby_and_clean_hooked_text(self) -> None:
         self.assertEqual(build_ruby_word("食べる", "たべる"), "<ruby>食<rt>た</rt></ruby>べる")
         self.assertEqual(build_ruby_word("頃合い", "ころあい"), "<ruby>頃合<rt>ころあ</rt></ruby>い")

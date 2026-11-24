@@ -11,12 +11,12 @@ import tempfile
 import unittest
 import zlib
 from pathlib import Path
-from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
 
+from galgame_anki.adapters.media_utils import extract_video_audio_mp3, extract_video_frame_webp
 from galgame_anki.adapters.xp3_psb import clean_psb_dialogue_text, extract_dialogues_from_psb_obj
 from galgame_anki.config import AppConfig
 from galgame_anki.core.voice_pack import VoicePackManager, normalize_dialogue_for_match
@@ -265,7 +265,7 @@ class TestVoicePackEngine(unittest.TestCase):
             finally:
                 mgr.close()
 
-    def test_main_window_prefers_voice_pack_over_bgm_recorder(self) -> None:
+    def test_main_window_extracts_pure_voice_pack_without_recorder(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             game_dir = root / "SampleGal"
@@ -313,31 +313,38 @@ class TestVoicePackEngine(unittest.TestCase):
                 ws_enabled=False,
                 clipboard_watch=False,
                 capture_audio_on_mine=True,
-                prefer_voice_pack_over_recorder=True,
                 active_voice_pack_id=summary.pack_id,
                 current_game_name="SampleGal",
             )
             win = MainWindow(config=cfg, load_demo=False)
+            self.assertFalse(hasattr(win, "audio_recorder"))
+            self.assertIsNone(extract_video_audio_mp3("/nonexistent/video.mkv", 0.0, 1.0))
+            self.assertIsNone(extract_video_frame_webp("/nonexistent/video.mkv", 0.5))
             # 替換為隔離測試用的 VoicePackManager
             win.voice_packs.close()
             win.voice_packs = VoicePackManager(db_path=vp_db)
             try:
-                with patch.object(win.audio_recorder, "extract_mp3_clip", side_effect=AssertionError("應直接使用純淨原包人聲，不該呼叫背景錄音！")):
-                    win._ingest_sentence("「高性能ですから！」", source="hook", media_title="SampleGal")
-                    rec = win.store.latest()
-                    assert rec is not None
-                    clip = win._extract_audio_for_record(rec)
-                    self.assertIsNotNone(clip)
-                    self.assertEqual(rec.audio_source, "voice_pack")
-                    self.assertEqual(rec.pack_translation, "「因為我是高性能的！」")
+                win._ingest_sentence("「高性能ですから！」", source="hook", media_title="SampleGal")
+                rec = win.store.latest()
+                assert rec is not None
+                clip = win._extract_audio_for_record(rec)
+                self.assertIsNotNone(clip)
+                self.assertEqual(rec.audio_source, "voice_pack")
+                self.assertEqual(rec.pack_translation, "「因為我是高性能的！」")
 
-                    # 測試旁白：matched 但無配音，必須跳過錄音以免錄進 BGM
-                    win._ingest_sentence("静かな波の音が聞こえる。", source="hook", media_title="SampleGal")
-                    rec2 = win.store.latest()
-                    assert rec2 is not None
-                    clip2 = win._extract_audio_for_record(rec2)
-                    self.assertIsNone(clip2)
-                    self.assertEqual(rec2.audio_source, "silent")
+                # 測試旁白：matched 但無配音，標記為 silent 且不產生音訊
+                win._ingest_sentence("静かな波の音が聞こえる。", source="hook", media_title="SampleGal")
+                rec2 = win.store.latest()
+                assert rec2 is not None
+                clip2 = win._extract_audio_for_record(rec2)
+                self.assertIsNone(clip2)
+                self.assertEqual(rec2.audio_source, "silent")
+
+                # 測試未命中劇本的句子：直接回傳 None（無系統錄音）
+                win._ingest_sentence("スクリプトに存在しないテスト文です。", source="hook", media_title="SampleGal")
+                rec3 = win.store.latest()
+                assert rec3 is not None
+                self.assertIsNone(win._extract_audio_for_record(rec3))
             finally:
                 win.close()
 

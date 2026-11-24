@@ -588,11 +588,17 @@ class OverlayLookupPopup(QFrame):
         if particle_info is not None:
             parts.append(f"【助詞用法】{particle_info.meaning}")
         elif match:
-            base = match.best_concise_meaning(dict_preference)
-            ctx = format_contextual_meaning(token.surface, lemma, base, match.reasons)
+            kind = dict_preference
+            base = match.best_concise_meaning(kind, strict=True)
+            if not base:
+                kind = "bilingual" if kind == "monolingual" else "monolingual"
+                base = match.best_concise_meaning(kind, strict=True)
+                if base:
+                    parts.append("雙語備援" if kind == "bilingual" else "日日詞典備援")
+            ctx = format_contextual_meaning(token.surface, lemma, base, match.reasons) if kind == "bilingual" else base
             if ctx:
                 parts.append(f"🎯 {ctx}")
-            extra = [s for s in match.concise_senses(dict_preference, max_senses=3) if s not in ctx]
+            extra = [s for s in match.concise_senses(kind, max_senses=3, strict=True) if s not in ctx]
             if extra:
                 parts.append("其他義項：" + " ／ ".join(extra[:2]))
         if not parts:

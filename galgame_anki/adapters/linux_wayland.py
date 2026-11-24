@@ -60,7 +60,6 @@ class LinuxWaylandAdapter(PlatformAdapter):
             "tesseract_jpn_ocr": "jpn" in jp_ocr_langs,
             "wl-paste": shutil.which("wl-paste") is not None,
             "spectacle": shutil.which("spectacle") is not None,
-            "pw-record": shutil.which("pw-record") is not None,
             "ffmpeg": shutil.which("ffmpeg") is not None,
         }
         notes: list[str] = []
@@ -76,8 +75,8 @@ class LinuxWaylandAdapter(PlatformAdapter):
             notes.append("⚠ Wayland 環境建議安裝 wl-clipboard (wl-paste)，才能在遊戲全螢幕/失焦時監聽剪貼簿。")
         if tools["wine"]:
             notes.append("✓ 已偵測到 Wine，可直接從本工具以日區環境（ja_JP.UTF-8）一鍵啟動生肉 Galgame。")
-        if tools["pw-record"] and tools["ffmpeg"]:
-            notes.append("✓ 已偵測到 PipeWire + FFmpeg，後續可直接無痛升級單進程自動語音切片。")
+        if tools["ffmpeg"]:
+            notes.append("✓ 已偵測到 FFmpeg，支援遊戲解包純人聲轉碼 MP3 與 mpv 原聲／截圖擷取。")
         if not tools["ankiconnect_addon"]:
             notes.append("ℹ 尚未在本機 Anki 外掛目錄偵測到 AnkiConnect (2055492159)，請在 Anki 中安裝並重啟。")
 

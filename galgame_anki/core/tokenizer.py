@@ -265,19 +265,20 @@ class JapaneseTokenizer:
             tokens = self._tokenize_dict_greedy(sentence)
 
         # 標記已知詞與未知實詞數量
-        unknown_indices: list[int] = []
-        for idx, tok in enumerate(tokens):
+        unknown_by_lemma: dict[str, list[Token]] = {}
+        for tok in tokens:
             if tok.is_punctuation or tok.is_function_word:
                 tok.is_known = True
                 continue
             if tok.lemma in known or tok.surface in known:
                 tok.is_known = True
             elif tok.is_content_word:
-                unknown_indices.append(idx)
+                unknown_by_lemma.setdefault(tok.lemma or tok.surface, []).append(tok)
 
-        is_1t = len(unknown_indices) == 1
+        is_1t = len(unknown_by_lemma) == 1
         if is_1t:
-            tokens[unknown_indices[0]].is_1t_candidate = True
+            for occurrence in next(iter(unknown_by_lemma.values())):
+                occurrence.is_1t_candidate = True
 
         # 生成整句振假名 HTML（活用變形詞精準只標漢字詞幹，避免出現「急いでる(いそぐ)」錯標！）
         ruby_parts = [build_conjugated_ruby(t.surface, t.lemma, t.reading) for t in tokens]
@@ -286,7 +287,7 @@ class JapaneseTokenizer:
         return TokenizedSentence(
             raw=sentence,
             tokens=tokens,
-            unknown_count=len(unknown_indices),
+            unknown_count=len(unknown_by_lemma),
             is_1t_sentence=is_1t,
             furigana_html=furigana_html,
         )

@@ -25,7 +25,7 @@
 - **Python / 依賴**：Python 3.15、`PySide6`、`janome`（純 Python MeCab IPADIC Viterbi，已寫入 `pyproject.toml`）
 - **Anki**：Flatpak `net.ankiweb.Anki`（Anki 26.x）+ AnkiConnect (`2055492159`, `http://127.0.0.1:8765`)，已啟用 FSRS
 - **mpv**：Flatpak `io.mpv.Mpv` v0.41.0（`/tmp` 與宿主持久共用；設定檔位於 `~/.var/app/io.mpv.Mpv/config/mpv/mpv.conf`）
-- **系統工具**：`parec`（PipeWire/PulseAudio 錄音）、`ffmpeg`、`spectacle`（KDE 靜默截圖）、`tesseract`（OCR）、`wine`、`qdbus`
+- **系統工具**：`ffmpeg`（純人聲轉碼／mpv 切音抽幀）、`spectacle`（KDE 靜默截圖）、`tesseract`（OCR）、`wine`、`qdbus`（已移除系統背景錄音功能）
 
 ---
 
@@ -52,7 +52,7 @@ galgame_anki/
 │   ├── xp3_psb.py           # 純 Python Kirikiri XP3（含 CxEncryption）+ M2 PSB (.scn) 解析與 Formats.dat 本機快取
 │   ├── mpv_bridge.py        # Flatpak io.mpv.Mpv 與原生 mpv 自動偵測、IPC 監聽與原生字幕隱藏
 │   ├── window_pin.py        # KDE Plasma 6 Wayland KWin DBus 原生 keepAbove 置頂與懸停浮窗定位
-│   ├── audio_recorder.py    # parec s16le 240s 環形緩衝 + VAD + MP3 編碼 + mpv FFmpeg 抽音抽幀
+│   ├── media_utils.py       # ffplay/paplay 試聽 ＋ mpv FFmpeg 無損切音抽幀（無系統錄音）
 │   ├── linux_wayland.py     # Wine 日區啟動、Spectacle 靜默 WebP 截圖、Wayland 環境診斷
 │   ├── ocr_engine.py        # 框選 OCR 辨識
 │   ├── text_sources.py      # 本機 WebSocket (127.0.0.1:6677) + wl-paste 剪貼簿監聽
@@ -62,7 +62,7 @@ galgame_anki/
 │   ├── overlay_window.py    # 置頂遮蓋替換覆蓋層（浮動微工具列、三套底色、固定尺寸、無阻膠囊）
 │   ├── sentence_widget.py   # FlowLayout 互動分詞台詞（支援懸停查詞與零殘影清空）
 │   ├── lookup_popup.py      # 主視窗詳情卡 & 覆蓋層 Yomitan 懸停浮窗（含多候選原形切換）
-│   ├── card_forge_dialog.py # 1 秒 Refold 精煉製卡確認窗（可點選核心釋義膠囊、試聽／補錄、CG 預覽）
+│   ├── card_forge_dialog.py # 1 秒 Refold 精煉製卡確認窗（可點選核心釋義膠囊、試聽純人聲、CG 預覽）
 │   ├── blueprint_dialog.py  # N5→N1 系統化學習藍圖 & 30 秒詞典／活用／五十音速查表
 │   ├── media_bridge_dialog.py # mpv 本地動畫連線設定視窗
 │   ├── voice_pack_dialog.py   # 遊戲解包純淨人聲索引建立／匯出／即時試聽管理視窗
@@ -88,8 +88,7 @@ galgame_anki/
 3. **覆蓋層換句殘影**：[`InteractiveSentenceWidget.clear_tokens()`](galgame_anki/ui/sentence_widget.py) 必須先 `w.hide(); w.setParent(None)` 再 `w.deleteLater()`，否則快速換句會出現前後句重疊。
 4. **覆蓋層禁止自動縮放**：`OverlayWindow.show_record()` 嚴禁呼叫 `self.adjustSize()`；切換無阻膠囊回復時須先還原 `resize(target_w, target_h)` 再將 `_freeflow_mode = False`。
 5. **Flatpak `io.mpv.Mpv` 隱藏原字幕**：實測 mpv v0.41.0 在 `--sub-visibility=no` 下仍可正常透過 `/tmp/galanki-mpv.sock` 推送 `sub-text` 事件。
-6. **Wayland 錄音**：使用 `parec --format=s16le --rate=24000 --channels=1 -d @DEFAULT_MONITOR@`（不要用 `pw-record`）。
-7. **遊戲解包純淨人聲（零著作權金鑰隨碼入庫）**：[`xp3_psb.py`](galgame_anki/adapters/xp3_psb.py) 不在倉庫內儲存任何遊戲解密 `ControlBlock` 或 `Formats.dat`；使用時由使用者動態下載公開社群資料庫快取至 `~/.local/share/galgame-anki/garbro/Formats.dat`，僅從 `.xp3` 索引偏移並對當前台詞單檔解包轉 MP3；命中旁白（無語音）時標記 `audio_source="silent"`，不退回錄音以免錄入純 BGM。
+6. **遊戲解包純淨人聲（已移除系統錄音／零著作權金鑰隨碼入庫）**：[`xp3_psb.py`](galgame_anki/adapters/xp3_psb.py) 不在倉庫內儲存任何遊戲解密 `ControlBlock` 或 `Formats.dat`；使用時由使用者動態下載公開社群資料庫快取至 `~/.local/share/galgame-anki/garbro/Formats.dat`，僅從 `.xp3` 索引偏移並對當前台詞單檔解包轉 MP3；命中旁白（無語音）時標記 `audio_source="silent"`，不產生多餘錄音檔案。
 
 ---
 
