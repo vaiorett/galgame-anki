@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "galgame-anki"
+version = "0.1.0"
+description = "邊玩 Galgame 邊學日語的一鍵 Anki 製卡與沉浸學習工具（Linux KDE Wayland / Wine 優先，預留 Windows 擴充介面）"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "PySide6>=6.6",
+    "httpx>=0.25",
+    "janome>=0.5",
+]
+
+[project.optional-dependencies]
+nlp = [
+    "sudachipy>=0.6",
+    "sudachidict-core",
+]
+
+[project.scripts]
+galgame-anki = "galgame_anki.main:main"
+
+[tool.setuptools.packages.find]
+include = ["galgame_anki*"]
+
+[tool.setuptools.package-data]
+galgame_anki = ["data/*.json"]
