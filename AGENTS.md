@@ -45,9 +45,11 @@ galgame_anki/
 │   ├── hook_cleaner.py      # Textractor 漸進前綴重繪與重複字元清理
 │   ├── anki_client.py       # AnkiConnect 客戶端 + Anki 26 collection.anki2 FSRS 偵測
 │   ├── anki_templates.py    # Refold 三階段原生主題 Anki 卡片模板
+│   ├── voice_pack.py        # 遊戲解包台詞↔純淨人聲 SQLite 索引（~/.local/share/galgame-anki/voice_packs.db）、游標防撞車與 FFmpeg 合聲混音
 │   └── sentence_store.py    # 近期 50 句歷史與音畫快取
 ├── adapters/
 │   ├── hook_engine.py       # TextractorCLI 自動下載／32-64bit 注入／線程評分與去重
+│   ├── xp3_psb.py           # 純 Python Kirikiri XP3（含 CxEncryption）+ M2 PSB (.scn) 解析與 Formats.dat 本機快取
 │   ├── mpv_bridge.py        # Flatpak io.mpv.Mpv 與原生 mpv 自動偵測、IPC 監聽與原生字幕隱藏
 │   ├── window_pin.py        # KDE Plasma 6 Wayland KWin DBus 原生 keepAbove 置頂與懸停浮窗定位
 │   ├── audio_recorder.py    # parec s16le 240s 環形緩衝 + VAD + MP3 編碼 + mpv FFmpeg 抽音抽幀
@@ -63,6 +65,7 @@ galgame_anki/
 │   ├── card_forge_dialog.py # 1 秒 Refold 精煉製卡確認窗（可點選核心釋義膠囊、試聽／補錄、CG 預覽）
 │   ├── blueprint_dialog.py  # N5→N1 系統化學習藍圖 & 30 秒詞典／活用／五十音速查表
 │   ├── media_bridge_dialog.py # mpv 本地動畫連線設定視窗
+│   ├── voice_pack_dialog.py   # 遊戲解包純淨人聲索引建立／匯出／即時試聽管理視窗
 │   ├── extra_dialogs.py     # 詞典管理（勾選啟用、上下排序、預設模式）＆ 難度避雷指南
 │   ├── hook_dialog.py       # Hook 線程／特殊碼／日誌管理
 │   ├── setup_wizard.py      # 一鍵初始化精靈
@@ -86,6 +89,7 @@ galgame_anki/
 4. **覆蓋層禁止自動縮放**：`OverlayWindow.show_record()` 嚴禁呼叫 `self.adjustSize()`；切換無阻膠囊回復時須先還原 `resize(target_w, target_h)` 再將 `_freeflow_mode = False`。
 5. **Flatpak `io.mpv.Mpv` 隱藏原字幕**：實測 mpv v0.41.0 在 `--sub-visibility=no` 下仍可正常透過 `/tmp/galanki-mpv.sock` 推送 `sub-text` 事件。
 6. **Wayland 錄音**：使用 `parec --format=s16le --rate=24000 --channels=1 -d @DEFAULT_MONITOR@`（不要用 `pw-record`）。
+7. **遊戲解包純淨人聲（零著作權金鑰隨碼入庫）**：[`xp3_psb.py`](galgame_anki/adapters/xp3_psb.py) 不在倉庫內儲存任何遊戲解密 `ControlBlock` 或 `Formats.dat`；使用時由使用者動態下載公開社群資料庫快取至 `~/.local/share/galgame-anki/garbro/Formats.dat`，僅從 `.xp3` 索引偏移並對當前台詞單檔解包轉 MP3；命中旁白（無語音）時標記 `audio_source="silent"`，不退回錄音以免錄入純 BGM。
 
 ---
 
@@ -95,7 +99,7 @@ galgame_anki/
 # 啟動應用程式
 /home/vaiorett/Projects/galgame-anki/run.sh
 
-# 執行完整 34 項單元 + Offscreen GUI 測試（使用隔離 XDG 目錄不汙染使用者設定）
+# 執行完整單元 + Offscreen GUI 測試（使用隔離 XDG 目錄不汙染使用者設定）
 XDG_CONFIG_HOME=/tmp/galanki_t_cfg XDG_DATA_HOME=/tmp/galanki_t_data \
 QT_QPA_PLATFORM=offscreen \
 PYTHONPATH=/home/vaiorett/Projects/galgame-anki \

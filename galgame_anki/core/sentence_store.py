@@ -22,7 +22,7 @@ class SentenceRecord:
     tokenized: TokenizedSentence
     timestamp: float = field(default_factory=time.time)
     end_timestamp: float | None = None
-    source: str = "manual"  # hook | mpv | browser | ws | clipboard | ocr | manual | demo
+    source: str = "manual"  # hook | mpv | ws | clipboard | ocr | manual | demo
     media_title: str = ""
     video_path: str = ""
     sub_start: float | None = None
@@ -30,7 +30,9 @@ class SentenceRecord:
     mined_words: set[str] = field(default_factory=set)
     grammar_analysis: SentenceGrammarAnalysis | None = None
     sentence_translation: str = ""
-    audio_clip: tuple[bytes, str] | None = None  # (mp3_bytes, filename)
+    pack_translation: str = ""       # 來自解包劇本內建的官方譯文（按需核對用，平時不顯示防劇透）
+    audio_clip: tuple[bytes, str] | None = None      # (mp3_bytes, filename)
+    audio_source: str = ""           # voice_pack | mpv | recorder | manual | silent
     screenshot_clip: tuple[bytes, str] | None = None  # (webp_bytes, filename)
 
 
@@ -94,7 +96,8 @@ class SentenceStore:
         latest.raw_text = tokenized.raw
         latest.tokenized = tokenized
         latest.grammar_analysis = grammar_analysis
-        latest.audio_clip = None  # 內容變長，下次製卡/試聽重新切完整音訊
+        latest.audio_clip = None  # 內容變長，下次製卡/試聽重新配對或切完整音訊
+        latest.audio_source = ""
         return latest
 
     def all_records(self) -> list[SentenceRecord]:

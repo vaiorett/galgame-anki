@@ -75,6 +75,8 @@ class CardForgeDialog(QDialog):
         manual_record_fn: Callable[[], tuple[bytes, str] | None] | None = None,
         capture_shot_fn: Callable[[], tuple[bytes, str] | None] | None = None,
         alt_lemmas: list[tuple[str, str, str, str]] | None = None,
+        audio_source: str = "",
+        pack_translation: str = "",
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -87,6 +89,8 @@ class CardForgeDialog(QDialog):
         self._mono_senses = list(mono_senses)
         self._alt_lemmas = alt_lemmas or []
         self._audio_clip = audio_clip
+        self._audio_source = audio_source
+        self._pack_translation = pack_translation
         self._screenshot_clip = screenshot_clip
         self._thread_pool = thread_pool
         self._manual_record_fn = manual_record_fn
@@ -324,8 +328,22 @@ class CardForgeDialog(QDialog):
     def _refresh_audio_ui(self) -> None:
         if self._audio_clip:
             mp3_bytes, _ = self._audio_clip
-            self.audio_status_lbl.setText(f"✅ 原聲已就緒（{len(mp3_bytes) / 1024:.1f} KB · 可先試聽）")
+            if self._audio_source == "voice_pack":
+                self.audio_status_lbl.setText(
+                    f"✨ 原包純淨人聲已就緒（零 BGM／零音效 · {len(mp3_bytes) / 1024:.1f} KB · 可試聽）"
+                )
+            elif self._audio_source == "mpv":
+                self.audio_status_lbl.setText(
+                    f"🎬 mpv 原聲切片已就緒（{len(mp3_bytes) / 1024:.1f} KB · 可試聽）"
+                )
+            else:
+                self.audio_status_lbl.setText(f"✅ 原聲已就緒（{len(mp3_bytes) / 1024:.1f} KB · 可先試聽）")
             self.play_btn.setEnabled(True)
+        elif self._audio_source == "silent":
+            self.audio_status_lbl.setText(
+                "🔇 劇本確認本句為旁白／無配音（已略過背景音樂，若實際有語音可點「⏺ 補錄 4 秒」）"
+            )
+            self.play_btn.setEnabled(False)
         else:
             self.audio_status_lbl.setText("⚠ 尚未捕獲此句人聲（可能為無配音旁白，可按「⏺ 補錄 4 秒」再點遊戲語音重播鈕）")
             self.play_btn.setEnabled(False)
@@ -364,6 +382,7 @@ class CardForgeDialog(QDialog):
         self.rerecord_btn.setEnabled(True)
         if clip:
             self._audio_clip = clip
+            self._audio_source = "manual"
             self.include_audio_chk.setChecked(True)
         self._refresh_audio_ui()
 
@@ -389,6 +408,9 @@ class CardForgeDialog(QDialog):
         self._refresh_shot_ui()
 
     def _fetch_translation(self) -> None:
+        if self._pack_translation:
+            self._on_trans_ok(self._pack_translation)
+            return
         self.trans_btn.setEnabled(False)
         self.trans_btn.setText("翻譯中…")
         worker = FunctionWorker(translate_sentence_free, self._raw_sentence)

@@ -14,6 +14,7 @@
 | **🪟 置頂遮蓋替換覆蓋層** | 預設 **🎭 遮蓋替換模式**（100% 不透明深黑／暖白／純黑底色直接覆蓋遊戲原字，絕不看兩份字幕）、**📌 KDE Wayland KWin 原生置頂**、固定尺寸零跳動、平時零按鈕、滑鼠懸停即查詞（Yomitan 風格）。 |
 | **🧠 4 層日語 NLP 語境釋義** | Janome（MeCab IPADIC）詞形詞性還原 ＋ 口語活用合併 ＋ 高頻口語詞表 ＋ 詞頻消歧義，精準還原口語活用（如 `わかった → 明白了`），支援 Yomitan `.zip` 詞典管理、單獨開關與優先序調整。 |
 | **🎙 原聲語音 ＋ 畫面 CG 精煉製卡** | `parec` 240 秒環形錄音緩衝 + VAD 靜音裁切 + mpv FFmpeg 無損抽音抽幀 + KDE `spectacle` 靜默截圖。經 **1 秒 Refold 精煉確認窗**選取單一核心意思後寫入 Anki（嚴格繼承原生主題，支援 Lv.1→Lv.2→Lv.3 模板）。 |
+| **📦 遊戲解包純淨人聲 (0% BGM)** | 免拆滿硬碟直讀 Kirikiri `.xp3`（支援 **ATRI 等 CxDec** ＋ M2 `.scn` PSB）與已解包資料夾，建立「**台詞 ↔ 聲優原聲**」SQLite 索引。試聽／製卡抽出 **0% BGM・0% 音效** 純人聲（旁白不誤錄 BGM），亦支援一鍵實體匯出。 |
 | **🗺️ 離線 N5→N1 系統學習藍圖** | 內建 51 條 N5→N1 核心句型、18 個助詞白話角色、日語語序直譯骨架、30 秒詞典／活用速查表，邊玩邊點亮已遇見語法；另附 **📋 問 Gemini/GPT** 一鍵複製提問詞。 |
 
 ---
@@ -67,9 +68,9 @@ galgame-anki/
 ├── galgame_anki/
 │   ├── main.py                # CLI 與 GUI 啟動入口
 │   ├── config.py              # 設定持久化 (~/.config/galgame-anki/config.json)
-│   ├── core/                  # 分詞、活用還原、SQLite 詞典、語境釋義、離線語法引擎、AnkiConnect
-│   ├── adapters/              # Textractor Hook、mpv IPC、KWin Wayland 置頂、parec 錄音、OCR、截圖
-│   ├── ui/                    # 主視窗、置頂遮蓋覆蓋層、查詞浮窗、Refold 製卡窗、學習藍圖、詞典管理
+│   ├── core/                  # 分詞、活用還原、SQLite 詞典、語境釋義、純人聲包索引、離線語法、AnkiConnect
+│   ├── adapters/              # Textractor Hook、XP3+CxDec/PSB 解析、mpv IPC、Wayland 置頂、錄音、OCR、截圖
+│   ├── ui/                    # 主視窗、置頂遮蓋覆蓋層、純人聲解包管理、查詞浮窗、Refold 製卡窗、學習藍圖
 │   └── data/                  # 高頻口語詞表、N5→N1 語法藍圖、基礎詞典與應用圖示
 ├── tests/                     # 單元與 PySide6 Offscreen GUI 自動化測試
 ├── run.sh                     # 一鍵啟動腳本

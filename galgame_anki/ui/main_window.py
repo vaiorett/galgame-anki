@@ -64,6 +64,7 @@ from galgame_anki.core.tokenizer import (
     Token,
     highlight_target_in_sentence,
 )
+from galgame_anki.core.voice_pack import VoicePackManager
 from galgame_anki.ui.blueprint_dialog import LearningBlueprintDialog
 from galgame_anki.ui.card_forge_dialog import CardForgeDialog, ForgedCardData
 from galgame_anki.ui.extra_dialogs import DifficultyGuideDialog, DictionaryManagerDialog
@@ -75,6 +76,7 @@ from galgame_anki.ui.sentence_widget import InteractiveSentenceWidget
 from galgame_anki.ui.settings_dialog import SettingsDialog
 from galgame_anki.ui.setup_wizard import SetupWizardDialog
 from galgame_anki.ui.theme import build_stylesheet
+from galgame_anki.ui.voice_pack_dialog import VoicePackDialog
 from galgame_anki.ui.workers import FunctionWorker
 
 # 來自 galgame.dev/topic/639 的經典範例句（隨時可從選單試玩）
@@ -105,6 +107,7 @@ class MainWindow(QMainWindow):
         self.progress_store = LearningProgressStore()
         self.anki = AnkiConnectClient(self.config.anki_url)
         self.store = SentenceStore(max_history=50)
+        self.voice_packs = VoicePackManager()
         self.ingestion = TextIngestionManager(self)
         self.hook_manager = GameHookManager(self)
         self.mpv_bridge = MpvSubtitleBridge(parent=self)
@@ -395,6 +398,10 @@ class MainWindow(QMainWindow):
         act_media.triggered.connect(self.open_media_bridge)
         self.game_menu.addAction(act_media)
 
+        act_voice = QAction("📦 解包遊戲提取純人聲 (0% BGM)...", self)
+        act_voice.triggered.connect(self.open_voice_pack_manager)
+        self.game_menu.addAction(act_voice)
+
         if self.config.recent_games:
             self.game_menu.addSeparator()
             hdr = QAction("最近遊玩（點擊直接啟動並自動 Hook）", self)
@@ -420,6 +427,10 @@ class MainWindow(QMainWindow):
         act_media = QAction("🎬 mpv 本地動畫／影片字幕連線設定", self)
         act_media.triggered.connect(self.open_media_bridge)
         self.more_menu.addAction(act_media)
+
+        act_voice = QAction("📦 遊戲解包與純人聲索引管理...", self)
+        act_voice.triggered.connect(self.open_voice_pack_manager)
+        self.more_menu.addAction(act_voice)
 
         self.more_menu.addSeparator()
 
@@ -569,6 +580,56 @@ class MainWindow(QMainWindow):
         self.audio_toggle_btn.blockSignals(False)
         self.statusBar().showMessage(msg, 4000)
 
+    def _current_game_exe_path(self) -> str:
+        target = self.hook_manager.attached_target
+        if target is not None and target.exe_path:
+            return str(target.exe_path)
+        if self.config.current_game_name and self.config.recent_games:
+            for item in self.config.recent_games:
+                if item.get("name") == self.config.current_game_name and item.get("path"):
+                    return str(item["path"])
+        return ""
+
+    def _resolve_voice_pack_id(self, rec: SentenceRecord | None = None) -> str | None:
+        if self.config.active_voice_pack_id:
+            return self.config.active_voice_pack_id
+        game_name = (rec.media_title if rec else "") or self.config.current_game_name
+        matched = self.voice_packs.resolve_pack_for_game(
+            game_name=game_name,
+            exe_path=self._current_game_exe_path(),
+        )
+        return matched.pack_id if matched is not None else None
+
+    def _prefetch_voice_pack_in_background(self, rec: SentenceRecord) -> None:
+        if not self.config.prefer_voice_pack_over_recorder or rec.source == "mpv":
+            return
+        pack_id = self._resolve_voice_pack_id(rec)
+        if not pack_id:
+            return
+        snapshot_text = rec.raw_text
+
+        def _match() -> None:
+            res = self.voice_packs.match_and_extract_voice(
+                text=snapshot_text,
+                pack_id=pack_id,
+                game_name=rec.media_title or self.config.current_game_name,
+                exe_path=self._current_game_exe_path(),
+            )
+            if not res.matched_line or rec.raw_text != snapshot_text:
+                return
+            if res.translation and not rec.pack_translation:
+                rec.pack_translation = res.translation
+            if res.has_voice and res.audio_clip is not None:
+                if rec.audio_source != "manual":
+                    rec.audio_clip = res.audio_clip
+                    rec.audio_source = "voice_pack"
+            elif rec.audio_source == "":
+                rec.audio_source = "silent"
+
+        worker = FunctionWorker(_match)
+        self._active_workers.append(worker)
+        self.thread_pool.start(worker)
+
     def _extract_audio_for_record(self, rec: SentenceRecord) -> tuple[bytes, str] | None:
         # 1. 若為 mpv 本地影片且帶有準確字幕時間軸，優先由 FFmpeg 無損直接裁切原聲！
         if rec.video_path and rec.sub_start is not None and rec.sub_end is not None:
@@ -581,11 +642,37 @@ class MainWindow(QMainWindow):
             )
             if mpv_clip is not None:
                 rec.audio_clip = mpv_clip
+                rec.audio_source = "mpv"
                 return mpv_clip
 
-        # 2. 已結束的台詞若已緩存音訊，直接重用
-        if rec.audio_clip is not None and rec.end_timestamp is not None:
+        # 2. 已取得純淨原包人聲／補錄／已結束台詞之音訊直接重用
+        if rec.audio_clip is not None and (
+            rec.audio_source in ("voice_pack", "manual", "mpv") or rec.end_timestamp is not None
+        ):
             return rec.audio_clip
+
+        # 3. 已索引遊戲本體／解包「台詞 ↔ 純淨聲優人聲」（0% BGM・0% 音效）
+        if self.config.prefer_voice_pack_over_recorder and rec.audio_source != "manual":
+            if rec.audio_source == "silent":
+                return None
+            pack_id = self._resolve_voice_pack_id(rec)
+            if pack_id:
+                res = self.voice_packs.match_and_extract_voice(
+                    text=rec.raw_text,
+                    pack_id=pack_id,
+                    game_name=rec.media_title or self.config.current_game_name,
+                    exe_path=self._current_game_exe_path(),
+                )
+                if res.matched_line:
+                    if res.translation and not rec.pack_translation:
+                        rec.pack_translation = res.translation
+                    if res.has_voice and res.audio_clip is not None:
+                        rec.audio_clip = res.audio_clip
+                        rec.audio_source = "voice_pack"
+                        return res.audio_clip
+                    # 劇本確定該句為旁白或無配音角色：故意不退回系統錄音以免錄入純 BGM！
+                    rec.audio_source = "silent"
+                    return None
 
         if not self.config.capture_audio_on_mine:
             return None
@@ -606,6 +693,8 @@ class MainWindow(QMainWindow):
         )
         if clip is not None and rec.end_timestamp is not None:
             rec.audio_clip = clip
+            if not rec.audio_source:
+                rec.audio_source = "recorder"
         return clip
 
     def _preview_current_audio(self) -> None:
@@ -627,14 +716,21 @@ class MainWindow(QMainWindow):
 
     def _on_audio_preview_ready(self, clip: tuple[bytes, str] | None) -> None:
         if not clip:
-            self.statusBar().showMessage(
-                "目前緩衝區無此句語音（請確認右上角「🎙 錄音中」已開啟，且遊戲／影片正在播放語音）。",
-                5000,
-            )
+            if self._current_record is not None and self._current_record.audio_source == "silent":
+                self.statusBar().showMessage(
+                    "🔇 劇本確認本句為旁白／無配音角色（已略過純 BGM；製卡時仍可手動補錄）。",
+                    5000,
+                )
+            else:
+                self.statusBar().showMessage(
+                    "目前緩衝區無此句語音（請確認右上角「🎙 錄音中」已開啟，或設定純人聲解包索引）。",
+                    5000,
+                )
             return
         mp3_bytes, name = clip
         play_mp3_bytes_async(mp3_bytes)
-        self.statusBar().showMessage(f"🔊 正在試聽原聲（{len(mp3_bytes) / 1024:.1f} KB · {name}）", 3500)
+        src_hint = "純淨原包人聲" if (self._current_record and self._current_record.audio_source == "voice_pack") else "原聲"
+        self.statusBar().showMessage(f"🔊 正在試聽{src_hint}（{len(mp3_bytes) / 1024:.1f} KB · {name}）", 3500)
 
     # === Anki 同步與製卡 ===
     def _update_budget_pill(self) -> None:
@@ -745,9 +841,13 @@ class MainWindow(QMainWindow):
             and prev_rec is not rec
             and prev_rec.source != "demo"
             and prev_rec.audio_clip is None
-            and self.config.capture_audio_on_mine
+            and prev_rec.audio_source != "silent"
+            and (self.config.capture_audio_on_mine or self._resolve_voice_pack_id(prev_rec) is not None)
         ):
             self._freeze_audio_in_background(prev_rec)
+
+        # 1.5 若已索引遊戲純淨人聲包，新台詞到達時即刻背景抽出 0% BGM 聲優原聲並推進劇情游標
+        self._prefetch_voice_pack_in_background(rec)
 
         # 2. 自動於背景靜默捕獲當下遊戲 / 動畫畫面 CG 快照（音畫情景記憶核心！）
         if source in ("hook", "mpv") and (
@@ -792,6 +892,8 @@ class MainWindow(QMainWindow):
         if self._current_record is None:
             return
         rec = self._current_record
+        if not rec.sentence_translation and rec.pack_translation:
+            rec.sentence_translation = rec.pack_translation
         if rec.sentence_translation:
             self.translation_label.setText(f"🌐 語境理解：{rec.sentence_translation}")
             self.translation_label.setVisible(not self.translation_label.isVisible())
@@ -825,6 +927,9 @@ class MainWindow(QMainWindow):
             self.mpv_bridge.set_native_subtitle_visible(not replace_mode)
 
     def _translate_record_for_overlay(self, rec: SentenceRecord) -> None:
+        if rec.pack_translation:
+            self._on_sentence_trans_ok(rec, rec.pack_translation)
+            return
         worker = FunctionWorker(translate_sentence_free, rec.raw_text)
         worker.signals.finished.connect(lambda tr, r=rec: self._on_sentence_trans_ok(r, tr))
         worker.signals.failed.connect(self._on_sentence_trans_fail)
@@ -874,6 +979,7 @@ class MainWindow(QMainWindow):
                 rec.media_title or self.config.current_game_name or "hook",
             )
 
+        self._prefetch_voice_pack_in_background(rec)
         self._refresh_history_list(select_record_id=rec.record_id)
         self._display_record(rec)
         if self.overlay.isVisible():
@@ -1051,6 +1157,9 @@ class MainWindow(QMainWindow):
         # 先取出音訊與畫面快照供精煉確認或直寫
         audio_clip = self._extract_audio_for_record(record)
         shot_clip = record.screenshot_clip
+        include_audio_default = (audio_clip is not None) or (
+            self.config.capture_audio_on_mine and record.audio_source != "silent"
+        )
 
         if self.config.quick_forge_before_mine:
             dlg = CardForgeDialog(
@@ -1067,12 +1176,14 @@ class MainWindow(QMainWindow):
                 sentence_translation=record.sentence_translation,
                 audio_clip=audio_clip,
                 screenshot_clip=shot_clip,
-                include_audio_default=self.config.capture_audio_on_mine,
+                include_audio_default=include_audio_default,
                 include_screenshot_default=self.config.capture_screenshot_on_mine or (shot_clip is not None),
                 thread_pool=self.thread_pool,
                 manual_record_fn=lambda: self.audio_recorder.capture_manual_window(4.0),
                 capture_shot_fn=self.adapter.capture_screenshot_webp,
                 alt_lemmas=alt_lemmas,
+                audio_source=record.audio_source,
+                pack_translation=record.pack_translation,
                 parent=self,
             )
             if not dlg.exec() or dlg.result_data is None:
@@ -1081,6 +1192,8 @@ class MainWindow(QMainWindow):
             if forged.sentence_translation:
                 record.sentence_translation = forged.sentence_translation
             if forged.audio_clip:
+                if forged.audio_clip != audio_clip:
+                    record.audio_source = "manual"
                 record.audio_clip = forged.audio_clip
             if forged.screenshot_clip:
                 record.screenshot_clip = forged.screenshot_clip
@@ -1093,9 +1206,9 @@ class MainWindow(QMainWindow):
                 pitch_accent=pitch,
                 definition_bilingual=default_bi,
                 definition_monolingual=default_mono,
-                sentence_translation=record.sentence_translation,
-                include_audio=self.config.capture_audio_on_mine,
-                audio_clip=audio_clip if self.config.capture_audio_on_mine else None,
+                sentence_translation=record.sentence_translation or record.pack_translation,
+                include_audio=include_audio_default,
+                audio_clip=audio_clip if include_audio_default else None,
                 include_screenshot=self.config.capture_screenshot_on_mine,
                 screenshot_clip=shot_clip if self.config.capture_screenshot_on_mine else None,
             )
@@ -1279,6 +1392,16 @@ class MainWindow(QMainWindow):
 
     def _on_hook_target_attached(self, target: HookTargetProcess) -> None:
         self.config.current_game_name = target.name
+        matched = self.voice_packs.resolve_pack_for_game(
+            game_name=target.name,
+            exe_path=target.exe_path,
+        )
+        if matched is not None:
+            self.config.active_voice_pack_id = matched.pack_id
+            self.statusBar().showMessage(
+                f"✨ 已自動配對純淨人聲包《{matched.game_name}》（{matched.voiced_line_count} 句 · 0% BGM）",
+                6000,
+            )
         self.config.save()
         if self.config.capture_audio_on_mine and not self.audio_recorder.is_recording:
             QTimer.singleShot(1500, self._start_audio_capture)
@@ -1342,11 +1465,18 @@ class MainWindow(QMainWindow):
                 locale=self.config.wine_locale,
             )
             self.config.add_recent_game(game_name, str(exe_path))
+            matched = self.voice_packs.resolve_pack_for_game(
+                game_name=game_name,
+                exe_path=str(exe_path),
+            )
+            if matched is not None:
+                self.config.active_voice_pack_id = matched.pack_id
             self.config.save()
             self._rebuild_game_menu()
             self.game_badge.setText(f"🎮 {game_name}")
+            vp_hint = f" · ✨純人聲包《{matched.game_name}》已配對" if matched else ""
             self.statusBar().showMessage(
-                f"🎮 已啟動「{game_name}」(PID {pid})，正在背景自動注入 Hook...",
+                f"🎮 已啟動「{game_name}」(PID {pid}){vp_hint}，正在背景自動注入 Hook...",
                 9000,
             )
             self._auto_attach_launched_game(exe_path, game_name)
@@ -1463,6 +1593,30 @@ class MainWindow(QMainWindow):
         dlg.mpv_launched.connect(lambda: self._toggle_overlay(True) if not self.overlay.isVisible() else None)
         dlg.exec()
 
+    def open_voice_pack_manager(self) -> None:
+        dlg = VoicePackDialog(
+            config=self.config,
+            voice_packs=self.voice_packs,
+            thread_pool=self.thread_pool,
+            parent=self,
+        )
+        dlg.packs_changed.connect(self._on_voice_packs_changed)
+        dlg.exec()
+
+    def _on_voice_packs_changed(self) -> None:
+        if self.config.active_voice_pack_id:
+            packs = [
+                p
+                for p in self.voice_packs.list_packs()
+                if p.pack_id == self.config.active_voice_pack_id
+            ]
+            if packs:
+                pk = packs[0]
+                self.statusBar().showMessage(
+                    f"📦 已啟用純淨人聲索引《{pk.game_name}》（{pk.voiced_line_count} 句有聲台詞 · 0% BGM）",
+                    5500,
+                )
+
     def open_setup_wizard(self) -> None:
         dlg = SetupWizardDialog(
             config=self.config,
@@ -1534,6 +1688,7 @@ class MainWindow(QMainWindow):
         self.overlay.shutdown_window_pin()
         self.overlay.close()
         self.ingestion.shutdown()
+        self.voice_packs.close()
         self.progress_store.close()
         self.dictionary.close()
         super().closeEvent(event)

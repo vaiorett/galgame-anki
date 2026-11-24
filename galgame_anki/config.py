@@ -72,6 +72,8 @@ class AppConfig:
     audio_max_seconds: int = 11
     capture_screenshot_on_mine: bool = True
     quick_forge_before_mine: bool = True
+    prefer_voice_pack_over_recorder: bool = True  # 優先使用遊戲解包／XP3 直讀純淨人聲（0% BGM/音效）
+    active_voice_pack_id: str = ""                # 可手動指定目前優先使用的人聲索引包（空字串＝自動依遊戲配對）
 
     # 輕量二次元 UI 與電影級固定覆蓋層
     ui_theme: str = "sakura"  # sakura (櫻霧輕透) | starlight (星夜琉璃)

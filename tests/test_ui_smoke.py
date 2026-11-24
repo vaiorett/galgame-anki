@@ -13,6 +13,9 @@ from PySide6.QtWidgets import QApplication
 
 from galgame_anki.adapters.mpv_bridge import MpvSubtitleEvent
 from galgame_anki.config import AppConfig
+from galgame_anki.core.dictionary import DictEntry, LookupMatch
+from galgame_anki.core.tokenizer import Token
+from galgame_anki.ui.lookup_popup import OverlayLookupPopup
 from galgame_anki.ui.blueprint_dialog import LearningBlueprintDialog
 from galgame_anki.ui.card_forge_dialog import CardForgeDialog
 from galgame_anki.ui.extra_dialogs import DifficultyGuideDialog, DictionaryManagerDialog
@@ -20,12 +23,27 @@ from galgame_anki.ui.main_window import MainWindow
 from galgame_anki.ui.media_bridge_dialog import MediaBridgeDialog
 from galgame_anki.ui.settings_dialog import SettingsDialog
 from galgame_anki.ui.setup_wizard import SetupWizardDialog
+from galgame_anki.ui.voice_pack_dialog import VoicePackDialog
 
 
 class TestUISmoke(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication([])
+
+    def test_hover_keeps_japanese_gloss_and_labels_fallback(self) -> None:
+        match = LookupMatch("走った", "走る", "はしる", ("過去",))
+        match.monolingual_entries.append(DictEntry("走る", "はしる", "", ["速く移動する"], "日日", "monolingual"))
+        token = Token("走った", "走る", "はしる", 0, 3, lookup=match)
+        popup = OverlayLookupPopup()
+        self.addCleanup(popup.close)
+        popup.popup_for_token(token, "monolingual", False)
+        self.assertEqual(popup.def_label.text(), "🎯 速く移動する")
+        match.monolingual_entries.clear()
+        match.bilingual_entries.append(DictEntry("走る", "はしる", "", ["奔跑"], "日中", "bilingual"))
+        popup.popup_for_token(token, "monolingual", False)
+        self.assertIn("雙語備援", popup.def_label.text())
+        self.assertIn("奔跑", popup.def_label.text())
 
     def test_main_window_overlay_blueprint_media_and_dialogs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -192,6 +210,36 @@ class TestUISmoke(unittest.TestCase):
 
             guide_dlg = DifficultyGuideDialog("sakura", win)
             guide_dlg.close()
+
+            vp_dlg = VoicePackDialog(cfg, win.voice_packs, win.thread_pool, win)
+            self.assertIn("純淨", vp_dlg.windowTitle())
+            vp_dlg.close()
+
+            vp_forge = CardForgeDialog(
+                stage_mode="lv2",
+                sentence_highlighted="「【よろしく】お願いしますね、夏生さん」",
+                raw_sentence="「よろしくお願いしますね、夏生さん」",
+                target_word="宜しく",
+                target_reading="よろしく",
+                pitch_accent="0",
+                bi_senses=["請多關照"],
+                mono_senses=["好意を求める挨拶。"],
+                default_bi="請多關照",
+                default_mono="好意を求める挨拶。",
+                sentence_translation="",
+                audio_clip=(b"ID3PURE", "pure.mp3"),
+                screenshot_clip=None,
+                include_audio_default=True,
+                include_screenshot_default=False,
+                thread_pool=win.thread_pool,
+                audio_source="voice_pack",
+                pack_translation="請多多指教喔，夏生先生",
+                parent=win,
+            )
+            self.assertIn("原包純淨人聲", vp_forge.audio_status_lbl.text())
+            vp_forge._fetch_translation()
+            self.assertEqual(vp_forge.trans_edit.text(), "請多多指教喔，夏生先生")
+            vp_forge.close()
 
             settings = SettingsDialog(cfg, win.thread_pool, win)
             self.assertEqual(settings.deck_edit.text(), "Galgame日語")
