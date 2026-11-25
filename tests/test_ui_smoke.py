@@ -105,7 +105,9 @@ class TestUISmoke(unittest.TestCase):
             self.assertTrue(win.overlay.isVisible())
             self.assertTrue(win.overlay._replace_mode)
             self.assertTrue(win.overlay._always_on_top)
-            self.assertEqual(win.overlay.pin_btn.text(), "📌 置頂")
+            self.assertTrue(win.overlay.act_pin.isChecked())
+            self.assertFalse(hasattr(win, "ocr_btn"))
+            self.assertFalse(hasattr(win.overlay, "ocr_btn"))
             self.assertAlmostEqual(win.overlay.windowOpacity(), 1.0, places=2)
             self.assertFalse(win.overlay.toolbar_widget.isVisible())
 

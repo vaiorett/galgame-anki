@@ -48,6 +48,7 @@ class AppConfig:
     stage_mode: str = "lv2"  # lv1 | lv2 | lv3
     daily_card_limit: int = 20
     auto_sync_known_words: bool = True
+    auto_launch_anki: bool = True  # 啟動 GalAnki 時自動在背景啟動 Anki 並最小化
 
     # 詞典顯示模式: auto (跟隨 stage_mode) | bilingual | monolingual
     dict_mode: str = "auto"
@@ -66,17 +67,18 @@ class AppConfig:
     wine_locale: str = "ja_JP.UTF-8"
     recent_games: list[dict[str, str]] = field(default_factory=list)
 
-    # 媒體擷取與 Refold 精煉製卡（從遊戲解包提取純淨聲優原聲／mpv 原聲＋當下畫面 CG 寫入 Anki）
+    # 媒體擷取與 Refold 精煉製卡（預設一鍵直寫 Anki＋右下角可撤銷；按住 Shift 點擊可先編輯）
     capture_audio_on_mine: bool = True
     capture_screenshot_on_mine: bool = True
-    quick_forge_before_mine: bool = True
+    quick_forge_before_mine: bool = False
     active_voice_pack_id: str = ""                # 可手動指定目前優先使用的人聲索引包（空字串＝自動依遊戲配對）
     # mpv 動畫進階沉浸（sub-transition 無字幕自動倍速 ＋ 精讀句尾暫停）
     mpv_auto_speedup: bool = False
     mpv_fast_speed: float = 2.0
     mpv_auto_pause_sub_end: bool = False
 
-    # 輕量二次元 UI 與電影級固定覆蓋層
+    # 單螢幕隱形伴讀（啟動收進系統匣、只留字幕覆蓋層）與二次元雙主題
+    start_in_tray_overlay: bool = True
     ui_theme: str = "sakura"  # sakura (櫻霧輕透) | starlight (星夜琉璃)
     overlay_opacity: float = 0.90
     overlay_font_size: int = 23

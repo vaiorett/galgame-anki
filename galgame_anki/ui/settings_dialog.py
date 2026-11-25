@@ -68,6 +68,12 @@ class SettingsDialog(QDialog):
         self.dict_mode_combo.addItem("強制日日單語詞典優先", "monolingual")
         af.addRow("詞典顯示策略：", self.dict_mode_combo)
 
+        self.tray_mode_chk = QCheckBox("啟動時收進系統匣，只顯示字幕覆蓋層（單螢幕隱形伴讀）")
+        af.addRow(self.tray_mode_chk)
+
+        self.auto_launch_anki_chk = QCheckBox("啟動時自動在背景啟動 Anki 並最小化（無須手動開 Anki）")
+        af.addRow(self.auto_launch_anki_chk)
+
         self.auto_sync_chk = QCheckBox("啟動時自動同步 Anki 已有詞彙（啟用 1T 句子高亮與防重）")
         af.addRow(self.auto_sync_chk)
 
@@ -77,7 +83,7 @@ class SettingsDialog(QDialog):
         self.screenshot_chk = QCheckBox("一鍵製卡時自動附帶當下遊戲／動畫 CG 畫面截圖（音畫情景記憶）")
         af.addRow(self.screenshot_chk)
 
-        self.forge_chk = QCheckBox("收錄前開啟 1 秒「✨ Refold 精煉製卡視窗」（精選單一核心意思＋核對音畫）")
+        self.forge_chk = QCheckBox("每次收錄都彈出編輯確認視窗（取消＝一鍵直寫＋右下角撤銷，按住 Shift 點擊仍可編輯）")
         af.addRow(self.forge_chk)
 
         self.theme_combo = QComboBox()
@@ -140,6 +146,8 @@ class SettingsDialog(QDialog):
         idx = self.dict_mode_combo.findData(c.dict_mode)
         if idx >= 0:
             self.dict_mode_combo.setCurrentIndex(idx)
+        self.tray_mode_chk.setChecked(c.start_in_tray_overlay)
+        self.auto_launch_anki_chk.setChecked(c.auto_launch_anki)
         self.auto_sync_chk.setChecked(c.auto_sync_known_words)
         self.audio_chk.setChecked(c.capture_audio_on_mine)
         self.screenshot_chk.setChecked(c.capture_screenshot_on_mine)
@@ -163,6 +171,8 @@ class SettingsDialog(QDialog):
         c.note_type = self.note_type_edit.text().strip() or "GalImmersion-OneClick"
         c.daily_card_limit = self.daily_limit_spin.value()
         c.dict_mode = str(self.dict_mode_combo.currentData() or "auto")
+        c.start_in_tray_overlay = self.tray_mode_chk.isChecked()
+        c.auto_launch_anki = self.auto_launch_anki_chk.isChecked()
         c.auto_sync_known_words = self.auto_sync_chk.isChecked()
         c.capture_audio_on_mine = self.audio_chk.isChecked()
         c.capture_screenshot_on_mine = self.screenshot_chk.isChecked()

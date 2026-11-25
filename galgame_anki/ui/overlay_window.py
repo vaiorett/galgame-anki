@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QPoint, Qt, QTimer, Signal
-from PySide6.QtGui import QGuiApplication, QMouseEvent
+from PySide6.QtGui import QAction, QGuiApplication, QMouseEvent
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QPushButton,
     QScrollArea,
     QSizeGrip,
@@ -66,7 +67,7 @@ class OverlayWindow(QWidget):
     prev_requested = Signal()
     next_requested = Signal()
     merge_prev_requested = Signal()
-    ocr_requested = Signal()
+    open_console_requested = Signal()
     audio_preview_requested = Signal()
     visibility_changed = Signal(bool)
     replace_mode_changed = Signal(bool)
@@ -223,7 +224,7 @@ class OverlayWindow(QWidget):
         self.guide_dismiss_btn.clicked.connect(self._dismiss_guide)
         gl.addWidget(self.guide_dismiss_btn)
 
-        # === 浮動懸停微工具列（貼齊底部右緣，平時完全隱形、絕不擋住第一行台詞查詞！） ===
+        # === 極簡浮動懸停微工具列（平時完全隱形，滑鼠移入才浮出 6 個直覺按鈕＋⚙ 設定選單） ===
         self.toolbar_widget = QFrame(self.container)
         self.toolbar_widget.setObjectName("OverlayToolbar")
         bar = QHBoxLayout(self.toolbar_widget)
@@ -231,108 +232,54 @@ class OverlayWindow(QWidget):
         bar.setSpacing(4)
 
         self.drag_hint = QLabel("⠿")
-        self.drag_hint.setToolTip("按住框內空白處或此處可拖曳對齊遊戲對話框")
+        self.drag_hint.setToolTip("按住框內空白處可拖曳對齊遊戲／mpv 字幕")
         bar.addWidget(self.drag_hint)
 
         self.toast_label = QLabel("")
         bar.addWidget(self.toast_label)
 
-        self.pin_btn = QPushButton("📌 置頂")
-        self.pin_btn.setCheckable(True)
-        self.pin_btn.setChecked(True)
-        self.pin_btn.setFixedHeight(21)
-        self.pin_btn.setToolTip(
-            "置頂於 Galgame／mpv 視窗之上（支援 KDE Wayland KWin 原生置頂；若遊戲全螢幕遮擋可切為無邊框視窗）"
-        )
-        self.pin_btn.clicked.connect(self._toggle_always_on_top)
-        bar.addWidget(self.pin_btn)
-
-        self.replace_btn = QPushButton("🎭 遮蓋")
-        self.replace_btn.setCheckable(True)
-        self.replace_btn.setChecked(True)
-        self.replace_btn.setFixedHeight(21)
-        self.replace_btn.setToolTip("開啟：100% 實色覆蓋遊戲原對話框（只看 1 份字）；關閉：改為輕透玻璃")
-        self.replace_btn.clicked.connect(self._toggle_replace_mode)
-        bar.addWidget(self.replace_btn)
-
-        self.backdrop_btn = QPushButton("🌌 深黑")
-        self.backdrop_btn.setFixedHeight(21)
-        self.backdrop_btn.setToolTip("一鍵切換覆蓋框底色以貼合不同遊戲對話框（深黑／暖白／純黑）")
-        self.backdrop_btn.clicked.connect(self._cycle_backdrop)
-        bar.addWidget(self.backdrop_btn)
-
-        self.font_down_btn = QPushButton("A-")
-        self.font_down_btn.setFixedSize(24, 21)
-        self.font_down_btn.setToolTip("縮小字體以貼合遊戲對話框")
-        self.font_down_btn.clicked.connect(lambda: self._adjust_font_size(-2))
-        bar.addWidget(self.font_down_btn)
-
-        self.font_up_btn = QPushButton("A+")
-        self.font_up_btn.setFixedSize(26, 21)
-        self.font_up_btn.setToolTip("放大字體以貼合遊戲對話框")
-        self.font_up_btn.clicked.connect(lambda: self._adjust_font_size(+2))
-        bar.addWidget(self.font_up_btn)
-
-        self.lock_btn = QPushButton("🔓 移動")
-        self.lock_btn.setCheckable(True)
-        self.lock_btn.setFixedHeight(21)
-        self.lock_btn.setToolTip("對齊遊戲對話框後點此鎖定，避免查詞時誤移動")
-        self.lock_btn.clicked.connect(self._toggle_lock)
-        bar.addWidget(self.lock_btn)
-
-        self.hover_btn = QPushButton("👆 懸停")
-        self.hover_btn.setCheckable(True)
-        self.hover_btn.setChecked(True)
-        self.hover_btn.setFixedHeight(21)
-        self.hover_btn.setToolTip("滑鼠移到生詞自動彈出語境解釋（像 Yomitan）")
-        self.hover_btn.clicked.connect(self._toggle_hover_lookup)
-        bar.addWidget(self.hover_btn)
-
-        self.trans_btn = QPushButton("🌐 句意")
-        self.trans_btn.setCheckable(True)
-        self.trans_btn.setFixedHeight(21)
-        self.trans_btn.setToolTip("顯示／隱藏本句中文語境理解")
-        self.trans_btn.clicked.connect(self._toggle_inline_trans)
-        bar.addWidget(self.trans_btn)
-
         self.audio_btn = QPushButton("🔊")
-        self.audio_btn.setFixedSize(26, 21)
+        self.audio_btn.setFixedSize(26, 22)
         self.audio_btn.setToolTip("試聽本句聲優原聲")
         self.audio_btn.clicked.connect(self.audio_preview_requested.emit)
         bar.addWidget(self.audio_btn)
 
+        self.trans_btn = QPushButton("🌐")
+        self.trans_btn.setCheckable(True)
+        self.trans_btn.setFixedSize(26, 22)
+        self.trans_btn.setToolTip("顯示／隱藏本句中文語境理解")
+        self.trans_btn.clicked.connect(self._toggle_inline_trans)
+        bar.addWidget(self.trans_btn)
+
         self.prev_btn = QPushButton("◀")
-        self.prev_btn.setFixedSize(24, 21)
+        self.prev_btn.setFixedSize(24, 22)
         self.prev_btn.setToolTip("上一句")
         self.prev_btn.clicked.connect(self.prev_requested.emit)
         bar.addWidget(self.prev_btn)
 
         self.next_btn = QPushButton("▶")
-        self.next_btn.setFixedSize(24, 21)
+        self.next_btn.setFixedSize(24, 22)
         self.next_btn.setToolTip("下一句")
         self.next_btn.clicked.connect(self.next_requested.emit)
         bar.addWidget(self.next_btn)
 
-        self.merge_btn = QPushButton("➕")
-        self.merge_btn.setFixedSize(24, 21)
-        self.merge_btn.setToolTip("合併上一句（當動畫／遊戲將完整一句拆成兩條字幕時，連同時間軸原聲一併合併）")
-        self.merge_btn.clicked.connect(self.merge_prev_requested.emit)
-        bar.addWidget(self.merge_btn)
+        self.lock_btn = QPushButton("🔓")
+        self.lock_btn.setCheckable(True)
+        self.lock_btn.setFixedSize(26, 22)
+        self.lock_btn.setToolTip("鎖定／解鎖覆蓋層位置與大小")
+        self.lock_btn.clicked.connect(self._toggle_lock)
+        bar.addWidget(self.lock_btn)
 
-        self.ocr_btn = QPushButton("📷")
-        self.ocr_btn.setFixedSize(26, 21)
-        self.ocr_btn.setToolTip("框選畫面 OCR")
-        self.ocr_btn.clicked.connect(self.ocr_requested.emit)
-        bar.addWidget(self.ocr_btn)
-
-        self.mode_btn = QPushButton("🌸 無阻")
-        self.mode_btn.setFixedHeight(21)
-        self.mode_btn.setToolTip("縮成迷你角落膠囊專心看劇情")
-        self.mode_btn.clicked.connect(self.toggle_freeflow_mode)
-        bar.addWidget(self.mode_btn)
+        self.options_btn = QPushButton("⚙")
+        self.options_btn.setFixedSize(26, 22)
+        self.options_btn.setToolTip("外觀、置頂、字體、合併上句與開啟主控制台")
+        self._options_menu = self._build_options_menu()
+        self.options_btn.clicked.connect(self._open_options_menu)
+        bar.addWidget(self.options_btn)
 
         hide_btn = QPushButton("✕")
-        hide_btn.setFixedSize(22, 21)
+        hide_btn.setFixedSize(22, 22)
+        hide_btn.setToolTip("暫時隱藏覆蓋層（可從系統匣隨時喚回）")
         hide_btn.clicked.connect(self.hide)
         bar.addWidget(hide_btn)
 
@@ -341,6 +288,75 @@ class OverlayWindow(QWidget):
         self.size_grip.setFixedSize(16, 16)
         self.size_grip.setStyleSheet("background: transparent; border: none;")
         self.size_grip.setToolTip("拖曳此角調整覆蓋區域大小以完全遮住遊戲原對話框")
+
+    def _build_options_menu(self) -> QMenu:
+        menu = QMenu(self)
+
+        act_console = QAction("🖥️ 開啟主控制台", self)
+        act_console.triggered.connect(self.open_console_requested.emit)
+        menu.addAction(act_console)
+
+        menu.addSeparator()
+
+        self.act_pin = QAction("📌 永遠置頂於遊戲／mpv 之上", self)
+        self.act_pin.setCheckable(True)
+        self.act_pin.setChecked(True)
+        self.act_pin.triggered.connect(self._toggle_always_on_top)
+        menu.addAction(self.act_pin)
+
+        self.act_replace = QAction("🎭 實色遮蓋原文字（不看兩份字幕）", self)
+        self.act_replace.setCheckable(True)
+        self.act_replace.setChecked(True)
+        self.act_replace.triggered.connect(self._toggle_replace_mode)
+        menu.addAction(self.act_replace)
+
+        self.act_backdrop = QAction(f"🎨 切換底色（目前：{BACKDROP_PRESETS[self._backdrop]['label']}）", self)
+        self.act_backdrop.triggered.connect(self._cycle_backdrop)
+        menu.addAction(self.act_backdrop)
+
+        act_font_up = QAction("🔠 放大字幕字體 (A+)", self)
+        act_font_up.triggered.connect(lambda: self._adjust_font_size(+2))
+        menu.addAction(act_font_up)
+
+        act_font_down = QAction("🔡 縮小字幕字體 (A-)", self)
+        act_font_down.triggered.connect(lambda: self._adjust_font_size(-2))
+        menu.addAction(act_font_down)
+
+        self.act_hover = QAction("👆 滑鼠懸停自動查詞", self)
+        self.act_hover.setCheckable(True)
+        self.act_hover.setChecked(True)
+        self.act_hover.triggered.connect(self._toggle_hover_lookup)
+        menu.addAction(self.act_hover)
+
+        menu.addSeparator()
+
+        act_merge = QAction("➕ 合併上一句 (Ctrl+J)", self)
+        act_merge.triggered.connect(self.merge_prev_requested.emit)
+        menu.addAction(act_merge)
+
+        act_freeflow = QAction("🌸 縮成角落無阻膠囊", self)
+        act_freeflow.triggered.connect(self.toggle_freeflow_mode)
+        menu.addAction(act_freeflow)
+
+        menu.aboutToHide.connect(self._on_options_menu_closed)
+        return menu
+
+    def _open_options_menu(self) -> None:
+        self._chrome_fade_timer.stop()
+        self._popup_hide_timer.stop()
+        self.popup.hide()
+        pos = self.options_btn.mapToGlobal(QPoint(0, -self._options_menu.sizeHint().height()))
+        self._options_menu.popup(pos)
+
+    def _on_options_menu_closed(self) -> None:
+        if not self._mouse_inside_overlay:
+            self._chrome_fade_timer.start()
+
+    def contextMenuEvent(self, event) -> None:  # noqa: N802
+        self._chrome_fade_timer.stop()
+        self.popup.hide()
+        self._options_menu.popup(event.globalPos())
+        event.accept()
 
     def _reposition_floating_controls(self) -> None:
         cw = self.container.width()
@@ -456,7 +472,7 @@ class OverlayWindow(QWidget):
             self._reposition_floating_controls()
 
     def _fade_chrome_idle(self) -> None:
-        if not self._mouse_inside_overlay and not self._mouse_inside_popup:
+        if not self._mouse_inside_overlay and not self._mouse_inside_popup and not self._options_menu.isVisible():
             self._set_chrome_active(False)
 
     def restore_saved_state(
@@ -484,31 +500,29 @@ class OverlayWindow(QWidget):
         self._locked = bool(locked)
         self.lock_btn.blockSignals(True)
         self.lock_btn.setChecked(self._locked)
-        self.lock_btn.setText("🔒 鎖定" if self._locked else "🔓 移動")
+        self.lock_btn.setText("🔒" if self._locked else "🔓")
         self.lock_btn.blockSignals(False)
 
         self._hover_lookup = bool(hover_lookup)
-        self.hover_btn.blockSignals(True)
-        self.hover_btn.setChecked(self._hover_lookup)
-        self.hover_btn.blockSignals(False)
+        self.act_hover.blockSignals(True)
+        self.act_hover.setChecked(self._hover_lookup)
+        self.act_hover.blockSignals(False)
         self.sentence_widget.set_hover_lookup_enabled(self._hover_lookup)
 
         self._always_on_top = bool(always_on_top)
-        self.pin_btn.blockSignals(True)
-        self.pin_btn.setChecked(self._always_on_top)
-        self.pin_btn.setText("📌 置頂" if self._always_on_top else "📌 未置頂")
-        self.pin_btn.blockSignals(False)
+        self.act_pin.blockSignals(True)
+        self.act_pin.setChecked(self._always_on_top)
+        self.act_pin.blockSignals(False)
         self._apply_qt_stay_on_top_flag(self._always_on_top, reshow=False)
         self._pinner.apply_pin(self._always_on_top, initial_geometry=self._initial_saved_geom)
 
         self._replace_mode = bool(replace_mode)
-        self.replace_btn.blockSignals(True)
-        self.replace_btn.setChecked(self._replace_mode)
-        self.replace_btn.setText("🎭 遮蓋" if self._replace_mode else "🪟 輕透")
-        self.replace_btn.blockSignals(False)
+        self.act_replace.blockSignals(True)
+        self.act_replace.setChecked(self._replace_mode)
+        self.act_replace.blockSignals(False)
 
         self._backdrop = backdrop if backdrop in BACKDROP_PRESETS else "vn_dark"
-        self.backdrop_btn.setText(BACKDROP_PRESETS[self._backdrop]["label"])
+        self.act_backdrop.setText(f"🎨 切換底色（目前：{BACKDROP_PRESETS[self._backdrop]['label']}）")
 
         self._font_size = max(15, min(38, int(font_size or 23)))
         self._guide_dismissed = bool(guide_dismissed)
@@ -577,7 +591,9 @@ class OverlayWindow(QWidget):
 
     def _toggle_always_on_top(self, checked: bool) -> None:
         self._always_on_top = bool(checked)
-        self.pin_btn.setText("📌 置頂" if checked else "📌 未置頂")
+        self.act_pin.blockSignals(True)
+        self.act_pin.setChecked(self._always_on_top)
+        self.act_pin.blockSignals(False)
         if self._pinner.is_supported:
             # KDE Plasma Wayland：直接透過 KWin DBus 即時切換 keepAbove（零閃爍、不重建視窗！）
             self._pinner.apply_pin(checked, force_reload=True)
@@ -593,8 +609,10 @@ class OverlayWindow(QWidget):
         self._pinner.shutdown()
 
     def _toggle_replace_mode(self, checked: bool) -> None:
-        self._replace_mode = checked
-        self.replace_btn.setText("🎭 遮蓋" if checked else "🪟 輕透")
+        self._replace_mode = bool(checked)
+        self.act_replace.blockSignals(True)
+        self.act_replace.setChecked(self._replace_mode)
+        self.act_replace.blockSignals(False)
         self._update_container_style(active=self._mouse_inside_overlay)
         self.show_toast("🎭 遮蓋模式：完全蓋住原文字" if checked else "🪟 已切換輕透模式")
         self.replace_mode_changed.emit(checked)
@@ -603,7 +621,7 @@ class OverlayWindow(QWidget):
     def _cycle_backdrop(self) -> None:
         idx = BACKDROP_ORDER.index(self._backdrop) if self._backdrop in BACKDROP_ORDER else 0
         self._backdrop = BACKDROP_ORDER[(idx + 1) % len(BACKDROP_ORDER)]
-        self.backdrop_btn.setText(BACKDROP_PRESETS[self._backdrop]["label"])
+        self.act_backdrop.setText(f"🎨 切換底色（目前：{BACKDROP_PRESETS[self._backdrop]['label']}）")
         self.apply_theme(self._theme_name)
         self.show_toast(f"底色：{BACKDROP_PRESETS[self._backdrop]['label']}")
         self._emit_state()
@@ -619,8 +637,11 @@ class OverlayWindow(QWidget):
         self._emit_state()
 
     def _toggle_lock(self, checked: bool) -> None:
-        self._locked = checked
-        self.lock_btn.setText("🔒 鎖定" if checked else "🔓 移動")
+        self._locked = bool(checked)
+        self.lock_btn.blockSignals(True)
+        self.lock_btn.setChecked(self._locked)
+        self.lock_btn.setText("🔒" if self._locked else "🔓")
+        self.lock_btn.blockSignals(False)
         if checked and not self._guide_dismissed:
             self._guide_dismissed = True
             self.guide_bar.hide()
@@ -630,8 +651,11 @@ class OverlayWindow(QWidget):
         self._emit_state()
 
     def _toggle_hover_lookup(self, checked: bool) -> None:
-        self._hover_lookup = checked
-        self.sentence_widget.set_hover_lookup_enabled(checked)
+        self._hover_lookup = bool(checked)
+        self.act_hover.blockSignals(True)
+        self.act_hover.setChecked(self._hover_lookup)
+        self.act_hover.blockSignals(False)
+        self.sentence_widget.set_hover_lookup_enabled(self._hover_lookup)
         self.show_toast("👆 懸停查詞已開啟" if checked else "👆 已改為點擊查詞")
         self._emit_state()
 

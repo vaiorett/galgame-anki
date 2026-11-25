@@ -364,20 +364,22 @@ QLabel#MutedLabel {{
     background-color: transparent;
 }}
 
-QLabel#PillOk {{
+QLabel#PillOk, QPushButton#PillOk {{
     background-color: {p.pill_ok_bg};
     color: {p.pill_ok_fg};
+    border: none;
     border-radius: 10px;
-    padding: 2px 9px;
+    padding: 3px 9px;
     font-size: 12px;
     font-weight: 600;
 }}
 
-QLabel#PillWarn {{
+QLabel#PillWarn, QPushButton#PillWarn {{
     background-color: {p.pill_warn_bg};
     color: {p.pill_warn_fg};
+    border: none;
     border-radius: 10px;
-    padding: 2px 9px;
+    padding: 3px 9px;
     font-size: 12px;
     font-weight: 600;
 }}

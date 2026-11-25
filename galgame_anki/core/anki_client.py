@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import re
+import shutil
 import sqlite3
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -366,6 +369,12 @@ class AnkiConnectClient:
             },
         )
 
+    def delete_notes(self, note_ids: list[int]) -> None:
+        """刪除剛寫入的 Anki 卡片（供「一鍵直寫 → ↩ 撤銷」功能使用）。"""
+        ids = [int(nid) for nid in note_ids if int(nid) > 0]
+        if ids:
+            self.invoke("deleteNotes", notes=ids)
+
 
 def _strip_html(raw: str) -> str:
     return re.sub(r"<[^>]+>", "", raw)
@@ -392,3 +401,67 @@ def detect_local_anki_addons_dir() -> Path | None:
 
 def is_ankiconnect_installed_locally() -> bool:
     return any((p / ANKICONNECT_ADDON_CODE).exists() for p in _anki_addons_candidates())
+
+
+def detect_anki_launch_command() -> list[str] | None:
+    """偵測本機 Anki 啟動指令（Linux 優先支援 Flatpak net.ankiweb.Anki 與原生 anki）。"""
+    if os.name == "nt":
+        exe = shutil.which("anki") or shutil.which("anki.exe")
+        if exe:
+            return [exe]
+        local_app = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Anki" / "anki.exe"
+        if local_app.exists():
+            return [str(local_app)]
+        return None
+
+    # Linux: 優先檢查 Flatpak net.ankiweb.Anki
+    flatpak = shutil.which("flatpak")
+    if flatpak:
+        if (Path.home() / ".var" / "app" / "net.ankiweb.Anki").exists():
+            return [flatpak, "run", "net.ankiweb.Anki"]
+        try:
+            res = subprocess.run(
+                [flatpak, "info", "net.ankiweb.Anki"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+                check=False,
+            )
+            if res.returncode == 0:
+                return [flatpak, "run", "net.ankiweb.Anki"]
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+    native = shutil.which("anki")
+    if native:
+        return [native]
+    return None
+
+
+def launch_anki_background(minimize_on_wayland: bool = True) -> tuple[bool, str]:
+    """在背景啟動 Anki（並於 KDE Plasma Wayland 自動最小化一次，不佔筆電螢幕）。"""
+    if os.environ.get("QT_QPA_PLATFORM", "").lower() in ("offscreen", "minimal"):
+        return False, "測試模式略過自動啟動 Anki"
+
+    cmd = detect_anki_launch_command()
+    if not cmd:
+        return False, "本機未偵測到 Anki（請確認已安裝 Flatpak 或原生 Anki）"
+
+    if minimize_on_wayland:
+        try:
+            from galgame_anki.adapters.window_pin import minimize_anki_once_kwin
+
+            minimize_anki_once_kwin(window_ms=18000)
+        except Exception:
+            pass
+
+    try:
+        subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        return True, f"已於背景啟動 Anki（{' '.join(cmd)}）並自動最小化"
+    except OSError as exc:
+        return False, f"啟動 Anki 失敗：{exc}"

@@ -198,15 +198,17 @@ class LookupDetailPanel(QFrame):
         self.audio_btn.clicked.connect(self.audio_preview_requested.emit)
         top.addWidget(self.audio_btn)
 
-        self.prompt_btn = QPushButton("📋 問 Gemini/GPT")
+        self.prompt_btn = QPushButton("📋 問 AI")
         self.prompt_btn.setObjectName("AccentBtn")
         self.prompt_btn.setToolTip("一鍵複製結構化日語拆解提問詞，直接貼給 Google AI Pro 或 ChatGPT Plus")
         self.prompt_btn.clicked.connect(self._emit_copy_prompt)
         top.addWidget(self.prompt_btn)
 
-        self.mine_btn = QPushButton("✨ 精煉收錄")
+        self.mine_btn = QPushButton("✨ 一鍵收錄")
         self.mine_btn.setObjectName("MineBtn")
-        self.mine_btn.setToolTip("開啟 1 秒 Refold 精煉製卡：選 1 條本句核心意思＋聲優原聲＋畫面 CG (Ctrl+Enter)")
+        self.mine_btn.setToolTip(
+            "左鍵直接寫入 Anki（自動挑本句最相關釋義＋原聲＋截圖，右下角可撤銷）；按住 Shift 點擊可先開啟編輯窗 (Ctrl+Enter)"
+        )
         self.mine_btn.setEnabled(False)
         self.mine_btn.clicked.connect(self._emit_mine)
         top.addWidget(self.mine_btn)
@@ -419,7 +421,7 @@ class LookupDetailPanel(QFrame):
             self.alt_layout.addStretch()
             self.alt_bar.show()
 
-        self.mine_btn.setText("✨ 追加例句" if already_known else "✨ 精煉收錄")
+        self.mine_btn.setText("✨ 追加例句" if already_known else "✨ 一鍵收錄")
 
         if match:
             base_bi = match.best_concise_meaning("bilingual", strict=True)
@@ -476,7 +478,7 @@ class OverlayLookupPopup(QFrame):
             | Qt.WindowType.WindowStaysOnTopHint,
         )
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
-        self.setFixedWidth(410)
+        self.setFixedWidth(385)
         self._theme_name = theme_name
         self._token: Token | None = None
         self._last_popup_args: tuple | None = None
@@ -497,7 +499,8 @@ class OverlayLookupPopup(QFrame):
         top.addStretch()
 
         close_btn = QPushButton("✕")
-        close_btn.setFixedSize(22, 22)
+        close_btn.setFixedSize(24, 24)
+        close_btn.setStyleSheet("padding: 0px; font-size: 12px;")
         close_btn.clicked.connect(self.hide)
         top.addWidget(close_btn)
         layout.addLayout(top)
@@ -535,8 +538,11 @@ class OverlayLookupPopup(QFrame):
         btn_row = QHBoxLayout()
         btn_row.setSpacing(6)
 
-        self.mine_btn = QPushButton("✨ 精煉收錄 Anki（音畫）")
+        self.mine_btn = QPushButton("✨ 一鍵收錄")
         self.mine_btn.setObjectName("MineBtn")
+        self.mine_btn.setToolTip(
+            "左鍵直接寫入 Anki（原聲＋截圖＋聯想樹，右下角可撤銷）；按住 Shift 點擊可先編輯"
+        )
         self.mine_btn.clicked.connect(self._on_mine)
         btn_row.addWidget(self.mine_btn, 1)
 
@@ -546,7 +552,8 @@ class OverlayLookupPopup(QFrame):
         self.audio_btn.clicked.connect(self.audio_preview_requested.emit)
         btn_row.addWidget(self.audio_btn)
 
-        self.prompt_btn = QPushButton("📋 問AI")
+        self.prompt_btn = QPushButton("📋")
+        self.prompt_btn.setFixedWidth(34)
         self.prompt_btn.setToolTip("複製提問詞給 Gemini Pro / ChatGPT Plus")
         self.prompt_btn.clicked.connect(self._on_copy_prompt)
         btn_row.addWidget(self.prompt_btn)
@@ -702,6 +709,6 @@ class OverlayLookupPopup(QFrame):
             parts.append("詞典暫無此詞條（可按「📋 問AI」複製給 Gemini/GPT，或直接收錄音畫句卡）。")
 
         self.def_label.setText("\n".join(parts))
-        self.mine_btn.setText("✨ 追加例句卡（音畫）" if already_known else "✨ 精煉收錄 Anki（音畫）")
+        self.mine_btn.setText("✨ 追加例句（Shift 編輯）" if already_known else "✨ 一鍵收錄（Shift 編輯）")
         self.adjustSize()
         self.show()

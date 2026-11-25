@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QPoint, Qt, QThreadPool, QTimer
-from PySide6.QtGui import QAction, QGuiApplication, QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QGuiApplication, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSplitter,
     QStatusBar,
+    QSystemTrayIcon,
     QVBoxLayout,
     QWidget,
 )
@@ -45,10 +46,13 @@ from galgame_anki.adapters.hook_engine import (
     list_wine_tasklist,
 )
 from galgame_anki.adapters.mpv_bridge import MpvSubtitleBridge, MpvSubtitleEvent
-from galgame_anki.adapters.ocr_engine import capture_region_and_ocr
 from galgame_anki.adapters.text_sources import TextIngestionManager
 from galgame_anki.config import AppConfig
-from galgame_anki.core.anki_client import AnkiCardPayload, AnkiConnectClient
+from galgame_anki.core.anki_client import (
+    AnkiCardPayload,
+    AnkiConnectClient,
+    launch_anki_background,
+)
 from galgame_anki.core.context_meaning import format_contextual_meaning, rank_senses_by_context
 from galgame_anki.core.dictionary import DictionaryEngine
 from galgame_anki.core.grammar_engine import (
@@ -78,6 +82,7 @@ from galgame_anki.ui.sentence_widget import InteractiveSentenceWidget
 from galgame_anki.ui.settings_dialog import SettingsDialog
 from galgame_anki.ui.setup_wizard import SetupWizardDialog
 from galgame_anki.ui.theme import build_stylesheet
+from galgame_anki.ui.toast_widget import FloatingUndoToast
 from galgame_anki.ui.voice_pack_dialog import VoicePackDialog
 from galgame_anki.ui.workers import FunctionWorker
 
@@ -97,9 +102,9 @@ class MainWindow(QMainWindow):
 
     def __init__(self, config: AppConfig | None = None, load_demo: bool = False) -> None:
         super().__init__()
-        self.setWindowTitle("GalAnki 🌸 邊玩邊看・系統化日語伴讀")
-        self.resize(860, 580)
-        self.setMinimumSize(720, 480)
+        self.setWindowTitle("GalAnki 🌸 控制台")
+        self.resize(740, 500)
+        self.setMinimumSize(600, 400)
 
         self.config = config or AppConfig.load()
         self.adapter = create_platform_adapter()
@@ -122,6 +127,11 @@ class MainWindow(QMainWindow):
         self._current_record: SentenceRecord | None = None
         self._selected_token: Token | None = None
         self._anki_connected: bool = False
+        self._anki_launch_attempted: bool = False
+        self._last_mined_was_known: dict[int, bool] = {}
+        self._tray_available: bool = False
+        self.tray_icon: QSystemTrayIcon | None = None
+        self._force_quit: bool = False
         self._closing: bool = False
 
         self.overlay = OverlayWindow(
@@ -147,13 +157,17 @@ class MainWindow(QMainWindow):
         self.overlay.prev_requested.connect(self._step_history_prev)
         self.overlay.next_requested.connect(self._step_history_next)
         self.overlay.merge_prev_requested.connect(self._merge_previous_sentence)
-        self.overlay.ocr_requested.connect(self._trigger_region_ocr)
+        self.overlay.open_console_requested.connect(self.show_console_window)
         self.overlay.audio_preview_requested.connect(self._preview_current_audio)
         self.overlay.visibility_changed.connect(self._on_overlay_visibility_changed)
         self.overlay.replace_mode_changed.connect(self._on_overlay_replace_mode_changed)
         self.overlay.state_saved.connect(self._on_overlay_state_saved)
 
+        self.undo_toast = FloatingUndoToast(theme_name=self.config.ui_theme)
+        self.undo_toast.undo_requested.connect(self._undo_mined_note)
+
         self._build_ui()
+        self._setup_system_tray()
         self._setup_shortcuts()
         self._connect_signals()
         self._apply_theme(self.config.ui_theme, save=False)
@@ -162,7 +176,7 @@ class MainWindow(QMainWindow):
         if load_demo or not self.store.latest():
             self._ingest_sentence(DEMO_SENTENCES[0][1], source="demo")
 
-        # 啟動後自動連接 Anki（同步已知詞並自動更新為原生默認主題模板）
+        # 啟動後自動連接 Anki（若未啟動且設定啟用，自動背景啟動並最小化，再同步熟詞與原生模板）
         QTimer.singleShot(250, self._background_sync_anki)
 
     def _build_ui(self) -> None:
@@ -172,46 +186,35 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # === 極簡二次元頂部膠囊工具列 ===
+        # === 極簡頂部控制列（單一筆電螢幕友善：只留 5 個核心入口，絕不堆疊重複按鈕） ===
         top_bar = QFrame()
         top_bar.setObjectName("TopBar")
         tl = QHBoxLayout(top_bar)
-        tl.setContentsMargins(12, 8, 12, 8)
+        tl.setContentsMargins(10, 7, 10, 7)
         tl.setSpacing(6)
 
-        # 1. 遊戲啟動 & mpv 影片字幕 統一來源選單
-        self.game_btn = QPushButton("🎮 遊戲/影片")
+        # 1. 遊戲 / mpv 來源選單（只管連線來源，不與工具箱重複）
+        self.game_btn = QPushButton("🎮 來源")
         self.game_btn.setObjectName("PrimaryBtn")
         self.game_menu = QMenu(self)
         self.game_btn.setMenu(self.game_menu)
         self._rebuild_game_menu()
         tl.addWidget(self.game_btn)
 
-        # 2. 遮蓋替換覆蓋層、系統學習藍圖與 OCR
+        # 2. 一鍵切回「只留覆蓋層」隱形模式（筆電單螢幕核心按鈕）
         self.overlay_btn = QPushButton("🪟 覆蓋層")
         self.overlay_btn.setCheckable(True)
-        self.overlay_btn.setToolTip("置頂遮蓋替換覆蓋層：直接蓋住遊戲原對話文字或取代 mpv 字幕，絕不看 2 份字幕")
-        self.overlay_btn.clicked.connect(self._toggle_overlay)
+        self.overlay_btn.setToolTip("顯示字幕覆蓋層並把控制台收進系統匣，整個筆電螢幕留給遊戲／mpv")
+        self.overlay_btn.clicked.connect(self._on_overlay_btn_clicked)
         tl.addWidget(self.overlay_btn)
 
-        self.blueprint_btn = QPushButton("🗺️ 藍圖")
-        self.blueprint_btn.setObjectName("AccentBtn")
-        self.blueprint_btn.setToolTip("開啟 N5→N1 系統化學習藍圖、實戰語法解鎖進度與「30秒看懂詞典與動詞活用」速查表")
-        self.blueprint_btn.clicked.connect(self.open_learning_blueprint)
-        tl.addWidget(self.blueprint_btn)
-
-        self.ocr_btn = QPushButton("📷 OCR")
-        self.ocr_btn.setToolTip("框選任意畫面對話框立即辨識日文 (Ctrl+Shift+O)")
-        self.ocr_btn.clicked.connect(self._trigger_region_ocr)
-        tl.addWidget(self.ocr_btn)
-
-        tl.addSpacing(3)
+        tl.addSpacing(2)
 
         # 3. 迷你三階段切換（登樓撤梯）
         self.stage_group = QButtonGroup(self)
         self.stage_buttons: dict[str, QPushButton] = {}
         for mode_id, label, tip in [
-            ("lv1", "Lv.1", "五十音破冰：精準假名提示 + 雙語詞典"),
+            ("lv1", "Lv.1", "五十音破冰：假名提示 + 雙語詞典"),
             ("lv2", "Lv.2", "精細沉浸：1T 高亮 + 雙語詞典"),
             ("lv3", "Lv.3", "登樓撤梯：日日單語詞典優先"),
         ]:
@@ -231,22 +234,17 @@ class MainWindow(QMainWindow):
         self.budget_pill.setToolTip("今日製卡數 / 每日建議上限")
         tl.addWidget(self.budget_pill)
 
-        self.anki_pill = QLabel("Anki…")
+        # 可點擊的 Anki 狀態膠囊（未連時點一下直接背景啟動 Anki）
+        self.anki_pill = QPushButton("Anki…")
         self.anki_pill.setObjectName("PillWarn")
+        self.anki_pill.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.anki_pill.setToolTip("點擊重新連線或在背景啟動 Anki")
+        self.anki_pill.clicked.connect(self._on_anki_pill_clicked)
         tl.addWidget(self.anki_pill)
 
-        # 5. 一鍵切換櫻花/星夜二次元主題
-        self.theme_btn = QPushButton("🌙" if self.config.ui_theme == "sakura" else "🌸")
-        self.theme_btn.setObjectName("GhostBtn")
-        self.theme_btn.setFixedWidth(32)
-        self.theme_btn.setToolTip("一鍵切換 🌸 櫻霧輕透 / 🌙 星夜琉璃 主題")
-        self.theme_btn.clicked.connect(self._toggle_theme)
-        tl.addWidget(self.theme_btn)
-
-        # 6. 輕量「更多」選單
-        self.more_btn = QPushButton("☰")
+        # 4. 單一集中工具箱選單（藍圖・純人聲・1T礦場・濃縮聽力・詞典・主題・設定・退出）
+        self.more_btn = QPushButton("☰ 工具")
         self.more_btn.setObjectName("GhostBtn")
-        self.more_btn.setFixedWidth(34)
         self.more_menu = QMenu(self)
         self._build_more_menu()
         self.more_btn.setMenu(self.more_menu)
@@ -254,10 +252,10 @@ class MainWindow(QMainWindow):
 
         root.addWidget(top_bar)
 
-        # === 主內容區（左：輕量對話框 + 查詞與離線邏輯語法卡；右：可收合 50 句歷史抽屜） ===
+        # === 主內容區（左：精簡台詞框 + 查詞詳情；右：可收合 50 句歷史抽屜） ===
         body = QWidget()
         body_layout = QVBoxLayout(body)
-        body_layout.setContentsMargins(12, 10, 12, 6)
+        body_layout.setContentsMargins(10, 8, 10, 4)
         body_layout.setSpacing(8)
 
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -265,28 +263,30 @@ class MainWindow(QMainWindow):
         left_col = QWidget()
         left_layout = QVBoxLayout(left_col)
         left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(10)
+        left_layout.setSpacing(8)
 
-        # --- Hero Galgame / 影片字幕台詞卡片 ---
+        # --- 台詞卡片 ---
         sent_frame = QFrame()
         sent_frame.setObjectName("SentencePanel")
         sf = QVBoxLayout(sent_frame)
-        sf.setContentsMargins(14, 10, 14, 10)
-        sf.setSpacing(6)
+        sf.setContentsMargins(12, 8, 12, 8)
+        sf.setSpacing(5)
 
         meta_row = QHBoxLayout()
-        meta_row.setSpacing(6)
+        meta_row.setSpacing(5)
 
-        self.game_badge = QLabel(self.config.current_game_name or "🌸 等待遊戲 / 影片字幕")
+        self.game_badge = QLabel(self.config.current_game_name or "🌸 等待遊戲 / mpv 字幕")
         self.game_badge.setObjectName("PillInfo")
         meta_row.addWidget(self.game_badge)
 
+        # 僅在 Hook 到遊戲且出現 ≥2 條線程時才顯示，平時完全隱藏不佔視覺空間
         self.thread_combo = QComboBox()
-        self.thread_combo.setMinimumWidth(140)
-        self.thread_combo.setMaximumWidth(230)
+        self.thread_combo.setMinimumWidth(120)
+        self.thread_combo.setMaximumWidth(210)
         self.thread_combo.addItem("🧵 自動線程", "auto")
-        self.thread_combo.setToolTip("若遊戲有多條 Hook 線程，可在此一鍵切換主對話線程")
+        self.thread_combo.setToolTip("若遊戲有多條 Hook 線程，可在此切換主對話線程")
         self.thread_combo.currentIndexChanged.connect(self._on_hook_thread_changed)
+        self.thread_combo.hide()
         meta_row.addWidget(self.thread_combo)
 
         meta_row.addStretch()
@@ -295,48 +295,59 @@ class MainWindow(QMainWindow):
         self.sentence_badge.setObjectName("PillOk")
         meta_row.addWidget(self.sentence_badge)
 
-        self.mpv_replay_btn = QPushButton("🔁 重播")
+        self.mpv_replay_btn = QPushButton("🔁")
         self.mpv_replay_btn.setObjectName("GhostBtn")
-        self.mpv_replay_btn.setToolTip("跳回目前 mpv 字幕開頭重聽一次")
+        self.mpv_replay_btn.setFixedWidth(30)
+        self.mpv_replay_btn.setToolTip("重播目前 mpv 字幕片段")
         self.mpv_replay_btn.clicked.connect(self._replay_mpv_current)
         self.mpv_replay_btn.hide()
         meta_row.addWidget(self.mpv_replay_btn)
 
-        self.mpv_speed_btn = QPushButton("⚡ 倍速")
+        self.mpv_speed_btn = QPushButton("⚡")
         self.mpv_speed_btn.setObjectName("GhostBtn")
+        self.mpv_speed_btn.setFixedWidth(30)
         self.mpv_speed_btn.setCheckable(True)
         self.mpv_speed_btn.setChecked(self.config.mpv_auto_speedup)
-        self.mpv_speed_btn.setToolTip("無字幕片段自動倍速快進（sub-transition），字幕出現立即回 1.0x")
+        self.mpv_speed_btn.setToolTip("無字幕片段自動倍速快進（sub-transition）")
         self.mpv_speed_btn.clicked.connect(self._toggle_mpv_auto_speedup)
         self.mpv_speed_btn.hide()
         meta_row.addWidget(self.mpv_speed_btn)
 
-        self.merge_prev_btn = QPushButton("➕ 合併上句")
+        self.merge_prev_btn = QPushButton("➕")
         self.merge_prev_btn.setObjectName("GhostBtn")
-        self.merge_prev_btn.setToolTip("合併上一句與本句台詞（同時合併 mpv 原聲時間軸，快捷鍵 Ctrl+J）")
+        self.merge_prev_btn.setFixedWidth(30)
+        self.merge_prev_btn.setToolTip("合併上一句台詞與時間軸原聲 (Ctrl+J)")
         self.merge_prev_btn.clicked.connect(self._merge_previous_sentence)
         meta_row.addWidget(self.merge_prev_btn)
 
-        self.translate_btn = QPushButton("🌐 核對句意")
+        self.translate_btn = QPushButton("🌐 句意")
         self.translate_btn.setObjectName("GhostBtn")
-        self.translate_btn.setToolTip("卡住時點一下核對整句自然中文意思（按需呼叫免費翻譯，平時隱藏不劇透）")
+        self.translate_btn.setToolTip("核對整句自然中文意思（平時隱藏不劇透）")
         self.translate_btn.clicked.connect(self._check_current_sentence_translation)
         meta_row.addWidget(self.translate_btn)
 
-        self.history_toggle_btn = QPushButton("🕒 歷史")
+        self.manual_toggle_btn = QPushButton("✏️")
+        self.manual_toggle_btn.setObjectName("GhostBtn")
+        self.manual_toggle_btn.setFixedWidth(30)
+        self.manual_toggle_btn.setCheckable(True)
+        self.manual_toggle_btn.setToolTip("顯示／隱藏手動輸入測試列")
+        self.manual_toggle_btn.clicked.connect(lambda c: self.manual_input.setVisible(c))
+        meta_row.addWidget(self.manual_toggle_btn)
+
+        self.history_toggle_btn = QPushButton("🕒")
         self.history_toggle_btn.setObjectName("GhostBtn")
+        self.history_toggle_btn.setFixedWidth(30)
         self.history_toggle_btn.setCheckable(True)
-        self.history_toggle_btn.setToolTip("展開/收合近期 50 句時光機")
+        self.history_toggle_btn.setToolTip("展開／收合近期 50 句歷史")
         self.history_toggle_btn.clicked.connect(self._toggle_history_drawer)
         meta_row.addWidget(self.history_toggle_btn)
 
         sf.addLayout(meta_row)
 
-        self.sentence_widget = InteractiveSentenceWidget(font_size=22, theme_name=self.config.ui_theme)
+        self.sentence_widget = InteractiveSentenceWidget(font_size=21, theme_name=self.config.ui_theme)
         self.sentence_widget.token_clicked.connect(self._on_main_token_clicked)
         sf.addWidget(self.sentence_widget)
 
-        # 按需顯示的「本句自然語境理解」（平時隱藏不破壞啃生肉沉浸感）
         self.translation_label = QLabel("")
         self.translation_label.setObjectName("MutedLabel")
         self.translation_label.setWordWrap(True)
@@ -344,15 +355,16 @@ class MainWindow(QMainWindow):
         self.translation_label.hide()
         sf.addWidget(self.translation_label)
 
-        # 精簡手動輸入列
+        # 手動輸入測試列預設隱藏，需要手動貼句子時點 ✏️ 才展開
         self.manual_input = QLineEdit()
-        self.manual_input.setPlaceholderText("手動貼上日語句測試分詞、語法拆解與製卡（Enter 送出）…")
+        self.manual_input.setPlaceholderText("手動貼上日語句測試分詞與收錄（Enter 送出）…")
         self.manual_input.returnPressed.connect(self._submit_manual_input)
+        self.manual_input.hide()
         sf.addWidget(self.manual_input)
 
         left_layout.addWidget(sent_frame)
 
-        # --- 查詞、白話詞性、離線邏輯語法與一鍵收錄卡片 ---
+        # --- 查詞、白話詞性、語法與聯想樹詳情卡 ---
         self.lookup_panel = LookupDetailPanel(theme_name=self.config.ui_theme)
         self.lookup_panel.mine_requested.connect(self._on_panel_mine)
         self.lookup_panel.copy_prompt_requested.connect(self._on_panel_copy_prompt)
@@ -372,18 +384,13 @@ class MainWindow(QMainWindow):
         hd_title.setStyleSheet("font-weight: 700; background: transparent;")
         hd.addWidget(hd_title)
 
-        hd_hint = QLabel("點任一句即可回溯查詞、試聽原聲並補製 Anki 卡片。")
-        hd_hint.setObjectName("MutedLabel")
-        hd_hint.setWordWrap(True)
-        hd.addWidget(hd_hint)
-
         self.history_list = QListWidget()
         self.history_list.currentRowChanged.connect(self._on_history_selected)
         hd.addWidget(self.history_list, 1)
 
         self.history_drawer.hide()
         self.splitter.addWidget(self.history_drawer)
-        self.splitter.setSizes([660, 220])
+        self.splitter.setSizes([560, 180])
 
         body_layout.addWidget(self.splitter, 1)
         root.addWidget(body, 1)
@@ -391,7 +398,7 @@ class MainWindow(QMainWindow):
         status_bar = QStatusBar()
         self.setStatusBar(status_bar)
         self.statusBar().showMessage(
-            "🌸 就緒：從左上角「🎮 遊戲/影片」啟動生肉或連接 mpv 影片字幕，或點「🗺️ 藍圖」看 30 秒上手指南。"
+            "🌸 單螢幕提示：點「🪟 覆蓋層」可把本視窗收進系統匣；收錄預設一鍵直寫（右下角可撤銷，按住 Shift 點擊可先編輯）。"
         )
 
     def _rebuild_game_menu(self) -> None:
@@ -401,38 +408,24 @@ class MainWindow(QMainWindow):
         act_launch.triggered.connect(self._launch_game_dialog)
         self.game_menu.addAction(act_launch)
 
-        act_attach = QAction("🪝 偵測並一鍵掛載進行中遊戲", self)
+        act_attach = QAction("🪝 偵測並掛載進行中遊戲", self)
         act_attach.triggered.connect(self._detect_and_attach_running_game)
         self.game_menu.addAction(act_attach)
 
-        act_mgr = QAction("🔧 Hook 線程・特殊碼與日誌管理", self)
-        act_mgr.triggered.connect(self.open_hook_manager)
-        self.game_menu.addAction(act_mgr)
-
-        self.game_menu.addSeparator()
-
-        act_media = QAction("🎬 連接 mpv 本地動畫／影片字幕...", self)
+        act_media = QAction("🎬 連接 mpv 本地動畫字幕...", self)
         act_media.triggered.connect(self.open_media_bridge)
         self.game_menu.addAction(act_media)
 
-        act_voice = QAction("📦 解包遊戲提取純人聲 (0% BGM)...", self)
-        act_voice.triggered.connect(lambda: self.open_voice_pack_manager(initial_tab=0))
-        self.game_menu.addAction(act_voice)
-
-        act_cond = QAction("🎧 按角色匯出濃縮被動聽力 MP3...", self)
-        act_cond.triggered.connect(lambda: self.open_voice_pack_manager(initial_tab=1))
-        self.game_menu.addAction(act_cond)
-
-        act_bank = QAction("💎 1T 黃金句礦場（從劇本挖礦）...", self)
-        act_bank.triggered.connect(self.open_sentence_bank)
-        self.game_menu.addAction(act_bank)
+        act_mgr = QAction("🔧 Hook 線程與日誌管理", self)
+        act_mgr.triggered.connect(self.open_hook_manager)
+        self.game_menu.addAction(act_mgr)
 
         if self.config.recent_games:
             self.game_menu.addSeparator()
-            hdr = QAction("最近遊玩（點擊直接啟動並自動 Hook）", self)
+            hdr = QAction("最近遊玩", self)
             hdr.setEnabled(False)
             self.game_menu.addAction(hdr)
-            for item in self.config.recent_games[:6]:
+            for item in self.config.recent_games[:5]:
                 name = item.get("name", "")
                 path = item.get("path", "")
                 if name and path:
@@ -442,18 +435,17 @@ class MainWindow(QMainWindow):
                     )
                     self.game_menu.addAction(act)
 
+        if hasattr(self, "_tray_menu"):
+            self._rebuild_tray_menu()
+
     def _build_more_menu(self) -> None:
         self.more_menu.clear()
 
-        act_bp = QAction("🗺️ N5→N1 學習藍圖 & 30 秒詞典／活用指南", self)
+        act_bp = QAction("🗺️ N5→N1 學習藍圖 & 速查表 (Ctrl+B)", self)
         act_bp.triggered.connect(self.open_learning_blueprint)
         self.more_menu.addAction(act_bp)
 
-        act_media = QAction("🎬 mpv 本地動畫／影片字幕連線設定", self)
-        act_media.triggered.connect(self.open_media_bridge)
-        self.more_menu.addAction(act_media)
-
-        act_voice = QAction("📦 遊戲解包與純人聲索引管理...", self)
+        act_voice = QAction("📦 遊戲解包純人聲 (0% BGM)...", self)
         act_voice.triggered.connect(lambda: self.open_voice_pack_manager(initial_tab=0))
         self.more_menu.addAction(act_voice)
 
@@ -461,51 +453,201 @@ class MainWindow(QMainWindow):
         act_cond.triggered.connect(lambda: self.open_voice_pack_manager(initial_tab=1))
         self.more_menu.addAction(act_cond)
 
-        act_bank = QAction("💎 1T 黃金句礦場（Sentence Bank）...", self)
+        act_bank = QAction("💎 1T 黃金句礦場 (Ctrl+Shift+M)...", self)
         act_bank.triggered.connect(self.open_sentence_bank)
         self.more_menu.addAction(act_bank)
 
         self.more_menu.addSeparator()
 
+        act_dict = QAction("📚 詞典管理（一鍵下載 / Yomitan .zip）", self)
+        act_dict.triggered.connect(self.open_dictionary_manager)
+        self.more_menu.addAction(act_dict)
+
         act_wiz = QAction("🚀 一鍵初始化精靈（Anki / FSRS / 詞典）", self)
         act_wiz.triggered.connect(self.open_setup_wizard)
         self.more_menu.addAction(act_wiz)
 
-        act_dict = QAction("📚 詞典管理（一鍵黃金 5 合 1 / Yomitan .zip）", self)
-        act_dict.triggered.connect(self.open_dictionary_manager)
-        self.more_menu.addAction(act_dict)
-
-        act_guide = QAction("🎯 生肉 Galgame 難度分級與避雷指南", self)
+        act_guide = QAction("🎯 生肉 Galgame 難度避雷指南", self)
         act_guide.triggered.connect(self.open_difficulty_guide)
         self.more_menu.addAction(act_guide)
 
-        demo_sub = self.more_menu.addMenu("✨ 試玩原攻略例句")
-        for label, sent in DEMO_SENTENCES:
-            a = QAction(label, self)
-            a.triggered.connect(
-                lambda _c=False, s=sent: self.ingestion.submit_manual_text(s, source="demo")
-            )
-            demo_sub.addAction(a)
-
         self.more_menu.addSeparator()
 
-        self.act_pause = QAction("⏸ 暫停自動監聽（無阻沉浸）", self)
+        self.act_theme_toggle = QAction(
+            "🌙 切換星夜深色主題" if self.config.ui_theme == "sakura" else "🌸 切換櫻霧淺色主題",
+            self,
+        )
+        self.act_theme_toggle.triggered.connect(self._toggle_theme)
+        self.more_menu.addAction(self.act_theme_toggle)
+
+        self.act_pause = QAction("⏸ 暫停自動監聽", self)
         self.act_pause.setCheckable(True)
         self.act_pause.triggered.connect(self._toggle_listening)
         self.more_menu.addAction(self.act_pause)
 
-        act_cfg = QAction("⚙ 進階設定（Anki・語音・字幕・Wine）", self)
+        act_cfg = QAction("⚙ 進階設定...", self)
         act_cfg.triggered.connect(self.open_settings)
         self.more_menu.addAction(act_cfg)
 
+        self.more_menu.addSeparator()
+
+        act_quit = QAction("🚪 完全退出 GalAnki (Ctrl+Q)", self)
+        act_quit.triggered.connect(self.quit_application)
+        self.more_menu.addAction(act_quit)
+
+    def _setup_system_tray(self) -> None:
+        """建立系統匣圖示（單螢幕隱形伴讀核心入口；無系統匣環境安全略過）。"""
+        import os
+
+        if os.environ.get("QT_QPA_PLATFORM", "").lower() in ("offscreen", "minimal"):
+            self._tray_available = False
+            return
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            self._tray_available = False
+            return
+
+        icon_path = Path(__file__).resolve().parent.parent / "data" / "galanki.svg"
+        icon = QIcon(str(icon_path)) if icon_path.exists() else self.windowIcon()
+        self.tray_icon = QSystemTrayIcon(icon, self)
+        self.tray_icon.setToolTip("GalAnki 🌸 伴讀待命中（左鍵開關控制台，右鍵展開選單）")
+        self._tray_menu = QMenu(self)
+        self._rebuild_tray_menu()
+        self.tray_icon.setContextMenu(self._tray_menu)
+        self.tray_icon.activated.connect(self._on_tray_activated)
+        self.tray_icon.show()
+        self._tray_available = True
+
+    def _rebuild_tray_menu(self) -> None:
+        if not hasattr(self, "_tray_menu"):
+            return
+        menu = self._tray_menu
+        menu.clear()
+
+        self._tray_overlay_act = QAction("🪟 顯示字幕覆蓋層", self)
+        self._tray_overlay_act.setCheckable(True)
+        self._tray_overlay_act.setChecked(self.overlay.isVisible())
+        self._tray_overlay_act.triggered.connect(self._toggle_overlay)
+        menu.addAction(self._tray_overlay_act)
+
+        act_console = QAction("🖥️ 開啟／收起主控制台", self)
+        act_console.triggered.connect(self._toggle_console_visibility)
+        menu.addAction(act_console)
+
+        menu.addSeparator()
+
+        act_launch = QAction("🎮 啟動日區遊戲並 Hook...", self)
+        act_launch.triggered.connect(self._launch_game_dialog)
+        menu.addAction(act_launch)
+
+        act_attach = QAction("🪝 掛載進行中遊戲", self)
+        act_attach.triggered.connect(self._detect_and_attach_running_game)
+        menu.addAction(act_attach)
+
+        act_mpv = QAction("🎬 連接 mpv 動畫字幕...", self)
+        act_mpv.triggered.connect(self.open_media_bridge)
+        menu.addAction(act_mpv)
+
+        if self.config.recent_games:
+            recent_sub = menu.addMenu("▶ 最近遊玩")
+            for item in self.config.recent_games[:5]:
+                name = item.get("name", "")
+                path = item.get("path", "")
+                if name and path:
+                    a = QAction(name, self)
+                    a.triggered.connect(
+                        lambda _c=False, p=path, n=name: self._launch_specific_game(Path(p), n)
+                    )
+                    recent_sub.addAction(a)
+
+        menu.addSeparator()
+
+        tools_sub = menu.addMenu("🧰 工具箱")
+        for label, cb in [
+            ("🗺️ N5→N1 學習藍圖", self.open_learning_blueprint),
+            ("📦 遊戲解包純人聲", lambda: self.open_voice_pack_manager(initial_tab=0)),
+            ("🎧 按角色匯出濃縮聽力", lambda: self.open_voice_pack_manager(initial_tab=1)),
+            ("💎 1T 黃金句礦場", self.open_sentence_bank),
+            ("📚 詞典管理", self.open_dictionary_manager),
+            ("⚙ 進階設定", self.open_settings),
+        ]:
+            act = QAction(label, self)
+            act.triggered.connect(cb)
+            tools_sub.addAction(act)
+
+        stage_sub = menu.addMenu(f"🎯 階段（目前 {self.config.stage_mode.upper()}）")
+        for mode_id, lbl in [
+            ("lv1", "Lv.1 五十音破冰（假名＋雙語）"),
+            ("lv2", "Lv.2 精細沉浸（1T＋雙語）"),
+            ("lv3", "Lv.3 登樓撤梯（日日單語）"),
+        ]:
+            a = QAction(lbl, self)
+            a.setCheckable(True)
+            a.setChecked(self.config.stage_mode == mode_id)
+            a.triggered.connect(lambda _c=False, m=mode_id: self._set_stage_mode(m))
+            stage_sub.addAction(a)
+
+        anki_txt = "✓ Anki 已連線" if self._anki_connected else "↻ 背景啟動並連接 Anki"
+        act_anki = QAction(anki_txt, self)
+        act_anki.triggered.connect(self._on_anki_pill_clicked)
+        menu.addAction(act_anki)
+
+        menu.addSeparator()
+
+        act_quit = QAction("🚪 退出 GalAnki", self)
+        act_quit.triggered.connect(self.quit_application)
+        menu.addAction(act_quit)
+
+    def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
+        if reason in (
+            QSystemTrayIcon.ActivationReason.Trigger,
+            QSystemTrayIcon.ActivationReason.DoubleClick,
+        ):
+            self._toggle_console_visibility()
+
+    def _toggle_console_visibility(self) -> None:
+        if self.isVisible() and not self.isMinimized():
+            self.hide()
+        else:
+            self.show_console_window()
+
+    def show_console_window(self) -> None:
+        """從系統匣或覆蓋層喚出主控制台。"""
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def show_overlay_only_mode(self) -> None:
+        """單螢幕隱形伴讀模式：顯示字幕覆蓋層並把主視窗收進系統匣。"""
+        self._toggle_overlay(True)
+        if self._tray_available:
+            self.hide()
+
+    def _on_overlay_btn_clicked(self, checked: bool) -> None:
+        if checked:
+            self._toggle_overlay(True)
+            if self._tray_available and self.config.start_in_tray_overlay:
+                self.hide()
+                self.undo_toast.show_info("🪟 已切為單螢幕覆蓋層模式（點系統匣圖示可隨時開啟控制台）", 3200)
+        else:
+            self._toggle_overlay(False)
+
+    def quit_application(self) -> None:
+        """真正退出整個應用程式（清理 KWin 置頂、Hook、mpv 與資料庫連線）。"""
+        self._force_quit = True
+        self.close()
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
+
     def _setup_shortcuts(self) -> None:
         QShortcut(QKeySequence("Ctrl+Return"), self, activated=self._shortcut_mine)
+        QShortcut(QKeySequence("Ctrl+Shift+Return"), self, activated=self._shortcut_mine_forge)
         QShortcut(QKeySequence("Ctrl+M"), self, activated=self._shortcut_mine)
-        QShortcut(QKeySequence("Ctrl+Shift+O"), self, activated=self._trigger_region_ocr)
         QShortcut(QKeySequence("Ctrl+P"), self, activated=self._preview_current_audio)
         QShortcut(QKeySequence("Ctrl+J"), self, activated=self._merge_previous_sentence)
         QShortcut(QKeySequence("Ctrl+Shift+M"), self, activated=self.open_sentence_bank)
         QShortcut(QKeySequence("Ctrl+B"), self, activated=self.open_learning_blueprint)
+        QShortcut(QKeySequence("Ctrl+Q"), self, activated=self.quit_application)
         QShortcut(QKeySequence("Ctrl+1"), self, activated=lambda: self._set_stage_mode("lv1"))
         QShortcut(QKeySequence("Ctrl+2"), self, activated=lambda: self._set_stage_mode("lv2"))
         QShortcut(QKeySequence("Ctrl+3"), self, activated=lambda: self._set_stage_mode("lv3"))
@@ -513,6 +655,10 @@ class MainWindow(QMainWindow):
     def _shortcut_mine(self) -> None:
         if self._current_record and self._selected_token:
             self._mine_record_token(self._current_record, self._selected_token)
+
+    def _shortcut_mine_forge(self) -> None:
+        if self._current_record and self._selected_token:
+            self._mine_record_token(self._current_record, self._selected_token, force_forge=True)
 
     def _connect_signals(self) -> None:
         self.ingestion.dedup_repeated = self.config.dedup_repeated_chars
@@ -549,10 +695,14 @@ class MainWindow(QMainWindow):
         app = QApplication.instance()
         if app is not None:
             app.setStyleSheet(build_stylesheet(theme_name))
-        self.theme_btn.setText("🌙" if theme_name == "sakura" else "🌸")
+        if hasattr(self, "act_theme_toggle"):
+            self.act_theme_toggle.setText(
+                "🌙 切換星夜深色主題" if theme_name == "sakura" else "🌸 切換櫻霧淺色主題"
+            )
         self.sentence_widget.set_theme_name(theme_name)
         self.lookup_panel.set_theme_name(theme_name)
         self.overlay.apply_theme(theme_name)
+        self.undo_toast.apply_theme(theme_name)
 
     def _toggle_theme(self) -> None:
         next_theme = "starlight" if self.config.ui_theme == "sakura" else "sakura"
@@ -582,6 +732,7 @@ class MainWindow(QMainWindow):
         self.config.stage_mode = mode
         self.config.save()
         self._apply_stage_ui()
+        self._rebuild_tray_menu()
         names = {
             "lv1": "Lv.1 五十音破冰（精準假名提示 + 雙語）",
             "lv2": "Lv.2 精細沉浸（1T 高亮 + 雙語）",
@@ -724,9 +875,46 @@ class MainWindow(QMainWindow):
         self.budget_pill.style().unpolish(self.budget_pill)
         self.budget_pill.style().polish(self.budget_pill)
 
-    def _background_sync_anki(self) -> None:
+    def _on_anki_pill_clicked(self) -> None:
+        if self._anki_connected:
+            self.statusBar().showMessage(
+                f"✓ Anki 已連線，已同步 {len(self.store.known_words)} 個已知詞彙",
+                3000,
+            )
+            return
+        self._anki_launch_attempted = False
+        self.anki_pill.setText("啟動 Anki…")
+        self.statusBar().showMessage("🚀 正在背景啟動 Anki 並自動最小化…", 5000)
+        self._background_sync_anki(allow_auto_launch=True)
+
+    def _background_sync_anki(self, allow_auto_launch: bool = True) -> None:
         def _sync() -> dict:
-            ver = self.anki.ping()
+            launched_msg = ""
+            try:
+                ver = self.anki.ping()
+            except Exception:
+                if allow_auto_launch and self.config.auto_launch_anki and not self._anki_launch_attempted:
+                    self._anki_launch_attempted = True
+                    ok, msg = launch_anki_background(minimize_on_wayland=True)
+                    if ok:
+                        launched_msg = msg
+                        ver = None
+                        for _ in range(15):
+                            if self._closing:
+                                break
+                            time.sleep(1.2)
+                            try:
+                                ver = self.anki.ping()
+                                break
+                            except Exception:
+                                continue
+                        if ver is None:
+                            raise RuntimeError("背景啟動 Anki 逾時，請確認已安裝 AnkiConnect (2055492159)")
+                    else:
+                        raise RuntimeError(msg)
+                else:
+                    raise
+
             self.anki.ensure_deck(self.config.deck_name)
             self.anki.ensure_note_type(self.config.note_type)
             known = (
@@ -735,7 +923,12 @@ class MainWindow(QMainWindow):
                 else set()
             )
             today_count = self.anki.get_today_mined_count(self.config.deck_name)
-            return {"version": ver, "known": known, "today": today_count}
+            return {
+                "version": ver,
+                "known": known,
+                "today": today_count,
+                "launched_msg": launched_msg,
+            }
 
         worker = FunctionWorker(_sync)
         worker.signals.finished.connect(self._on_anki_sync_ok)
@@ -744,6 +937,8 @@ class MainWindow(QMainWindow):
         self.thread_pool.start(worker)
 
     def _on_anki_sync_ok(self, info: dict) -> None:
+        if self._closing:
+            return
         self._anki_connected = True
         self.store.known_words.update(info["known"])
         self.store.today_mined_count = int(info["today"])
@@ -754,16 +949,21 @@ class MainWindow(QMainWindow):
         self.anki_pill.setObjectName("PillOk")
         self.anki_pill.style().unpolish(self.anki_pill)
         self.anki_pill.style().polish(self.anki_pill)
+        self._rebuild_tray_menu()
+        if info.get("launched_msg"):
+            self.statusBar().showMessage(f"✓ {info['launched_msg']}", 5000)
 
         if self._current_record is not None:
             self._retokenize_current()
 
     def _on_anki_sync_fail(self, _err: str) -> None:
         self._anki_connected = False
-        self.anki_pill.setText("Anki 未連")
+        self.anki_pill.setText("↻ 啟動 Anki")
+        self.anki_pill.setToolTip("Anki 尚未連線：點擊此處自動在背景啟動 Anki 並最小化")
         self.anki_pill.setObjectName("PillWarn")
         self.anki_pill.style().unpolish(self.anki_pill)
         self.anki_pill.style().polish(self.anki_pill)
+        self._rebuild_tray_menu()
 
     # === 多來源文本進流（Galgame Hook / mpv 影片 / OCR / 剪貼簿） ===
     def _on_ingestion_sentence_meta(self, text: str, source: str, media_title: str) -> None:
@@ -1150,8 +1350,13 @@ class MainWindow(QMainWindow):
         if self._current_record is not None:
             self._mine_record_token(self._current_record, token)
 
-    def _mine_record_token(self, record: SentenceRecord, token: Token) -> None:
-        """依攻略方法論製卡：拒絕硬搬整頁詞典，精選單一核心意思＋聲優原聲＋當下畫面 CG＋整句理解。"""
+    def _mine_record_token(
+        self,
+        record: SentenceRecord,
+        token: Token,
+        force_forge: bool | None = None,
+    ) -> None:
+        """預設一鍵直寫精煉記憶卡（自動挑最相關釋義＋原聲＋截圖＋聯想樹，右下角可撤銷）；按住 Shift 點擊才彈出編輯窗。"""
         if self.store.today_mined_count >= self.config.daily_card_limit:
             self.statusBar().showMessage(
                 f"💡 今日已達建議上限（{self.config.daily_card_limit} 張），適時切換無阻沉浸享受劇情防爆倉。",
@@ -1222,7 +1427,14 @@ class MainWindow(QMainWindow):
                 assoc_html = assoc_tree.to_anki_html()
                 assoc_preview = assoc_tree.to_compact_preview_text()
 
-        if self.config.quick_forge_before_mine:
+        shift_held = bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
+        should_open_forge = (
+            force_forge
+            if force_forge is not None
+            else (self.config.quick_forge_before_mine or shift_held)
+        )
+
+        if should_open_forge:
             dlg = CardForgeDialog(
                 stage_mode=self.config.stage_mode,
                 sentence_highlighted=highlighted_sentence,
@@ -1246,7 +1458,7 @@ class MainWindow(QMainWindow):
                 pack_translation=record.pack_translation,
                 related_words_html=assoc_html,
                 related_words_preview=assoc_preview,
-                parent=self,
+                parent=self if self.isVisible() else None,
             )
             if not dlg.exec() or dlg.result_data is None:
                 return
@@ -1274,6 +1486,9 @@ class MainWindow(QMainWindow):
                 related_words_html=assoc_html,
             )
 
+        target_final = forged.target_word or lemma
+        was_known_before = target_final in self.store.known_words
+
         def _do_mine() -> dict:
             self.anki.ensure_deck(self.config.deck_name)
             self.anki.ensure_note_type(self.config.note_type)
@@ -1288,7 +1503,7 @@ class MainWindow(QMainWindow):
                     screenshot_bytes, screenshot_name = shot
 
             payload = AnkiCardPayload(
-                target_word=forged.target_word or lemma,
+                target_word=target_final,
                 target_reading=forged.target_reading,
                 pitch_accent=forged.pitch_accent,
                 sentence=forged.sentence,
@@ -1314,12 +1529,13 @@ class MainWindow(QMainWindow):
             return {
                 "note_id": note_id,
                 "record": record,
-                "lemma": forged.target_word or lemma,
+                "lemma": target_final,
+                "was_known_before": was_known_before,
                 "has_audio": bool(audio_bytes),
                 "has_shot": bool(screenshot_bytes),
             }
 
-        self.statusBar().showMessage(f"✨ 正在寫入精煉記憶卡「{forged.target_word or lemma}」至 Anki...")
+        self.statusBar().showMessage(f"✨ 正在寫入精煉記憶卡「{target_final}」至 Anki...")
         worker = FunctionWorker(_do_mine)
         worker.signals.finished.connect(self._on_mine_success)
         worker.signals.failed.connect(self._on_mine_failed)
@@ -1327,8 +1543,17 @@ class MainWindow(QMainWindow):
         self.thread_pool.start(worker)
 
     def _on_mine_success(self, res: dict) -> None:
+        if self._closing:
+            return
         rec: SentenceRecord = res["record"]
         lemma: str = res["lemma"]
+        note_id: int = int(res.get("note_id") or 0)
+        if note_id > 0:
+            self._last_mined_was_known[note_id] = bool(res.get("was_known_before", False))
+            if len(self._last_mined_was_known) > 30:
+                oldest = next(iter(self._last_mined_was_known))
+                self._last_mined_was_known.pop(oldest, None)
+
         badges: list[str] = []
         if res.get("has_audio"):
             badges.append("🔊原聲")
@@ -1339,11 +1564,45 @@ class MainWindow(QMainWindow):
         self.store.mark_mined(rec, lemma)
         self._update_budget_pill()
         self._refresh_history_list(select_record_id=rec.record_id)
+        if self._current_record is not None:
+            self._retokenize_current()
 
-        msg = f"✓ 已收錄精煉卡「{lemma}」{media_tag} · 今日 {self.store.today_mined_count}/{self.config.daily_card_limit}"
+        msg = f"✓ 已收錄「{lemma}」{media_tag} · {self.store.today_mined_count}/{self.config.daily_card_limit}"
         self.statusBar().showMessage(msg, 5500)
-        if self.overlay.isVisible():
-            self.overlay.show_toast(msg)
+        self.undo_toast.show_mined(msg, note_id=note_id, lemma=lemma, duration_ms=6000)
+
+    def _undo_mined_note(self, note_id: int, lemma: str) -> None:
+        """一鍵撤銷剛剛直寫入 Anki 的卡片並還原今日計數與熟詞狀態。"""
+        def _do_undo() -> dict:
+            self.anki.delete_notes([note_id])
+            return {"note_id": note_id, "lemma": lemma}
+
+        worker = FunctionWorker(_do_undo)
+        worker.signals.finished.connect(self._on_undo_success)
+        worker.signals.failed.connect(self._on_undo_failed)
+        self._active_workers.append(worker)
+        self.thread_pool.start(worker)
+
+    def _on_undo_success(self, res: dict) -> None:
+        if self._closing:
+            return
+        note_id = int(res["note_id"])
+        lemma = str(res["lemma"])
+        was_known = self._last_mined_was_known.pop(note_id, False)
+        if not was_known:
+            self.store.known_words.discard(lemma)
+        self.store.today_mined_count = max(0, self.store.today_mined_count - 1)
+        self._update_budget_pill()
+        if self._current_record is not None:
+            self._retokenize_current()
+        msg = f"↩ 已撤銷「{lemma}」"
+        self.statusBar().showMessage(msg, 4000)
+        self.undo_toast.show_info(msg, duration_ms=2600)
+
+    def _on_undo_failed(self, err: str) -> None:
+        msg = f"⚠ 撤銷失敗：{err}"
+        self.statusBar().showMessage(msg, 5000)
+        self.undo_toast.show_info(msg, duration_ms=4000)
 
     def _mine_grammar_card(self, pattern: dict[str, Any], example_sentence: str) -> None:
         """從「🗺️ 系統化學習藍圖」一鍵把 N5→N1 核心語法與真實例句收錄至 Anki。"""
@@ -1392,10 +1651,13 @@ class MainWindow(QMainWindow):
 
     def _on_mine_failed(self, err: str) -> None:
         self.statusBar().showMessage(f"收錄失敗：{err}", 6000)
+        if not self.isVisible():
+            self.undo_toast.show_info(f"⚠ 收錄失敗：{err}", duration_ms=5000)
+            return
         QMessageBox.warning(
             self,
             "收錄 Anki 失敗",
-            f"{err}\n\n請確認 Anki 已開啟，或從右上角「☰ → 一鍵初始化精靈」檢查連線。",
+            f"{err}\n\n可點擊右上角「↻ 啟動 Anki」或從「☰ 工具 → 一鍵初始化精靈」檢查連線。",
         )
 
     def _submit_manual_input(self) -> None:
@@ -1416,8 +1678,9 @@ class MainWindow(QMainWindow):
             self.game_badge.setText(label)
             self.game_badge.setObjectName("PillOk")
         else:
-            self.game_badge.setText(self.config.current_game_name or "🌸 等待遊戲 / 影片字幕")
+            self.game_badge.setText(self.config.current_game_name or "🌸 等待遊戲 / mpv 字幕")
             self.game_badge.setObjectName("PillInfo")
+            self.thread_combo.hide()
         self.game_badge.style().unpolish(self.game_badge)
         self.game_badge.style().polish(self.game_badge)
         self.statusBar().showMessage(label, 5000)
@@ -1434,6 +1697,7 @@ class MainWindow(QMainWindow):
                 target_idx = idx
         self.thread_combo.setCurrentIndex(target_idx)
         self.thread_combo.blockSignals(False)
+        self.thread_combo.setVisible(len(threads) >= 2)
 
     def _on_hook_thread_changed(self, idx: int) -> None:
         if idx < 0:
@@ -1585,28 +1849,7 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self.statusBar().showMessage(f"⚠ 自動掛載失敗：{exc}", 7000)
 
-    # === OCR、覆蓋層、學習藍圖、mpv 影片橋接與工具視窗 ===
-    def _trigger_region_ocr(self) -> None:
-        self.ocr_btn.setEnabled(False)
-        self.statusBar().showMessage("📷 請拖曳框選對話框區域（Esc 取消）...")
-        worker = FunctionWorker(capture_region_and_ocr, False)
-        worker.signals.finished.connect(self._on_ocr_done)
-        worker.signals.failed.connect(self._on_ocr_failed)
-        self._active_workers.append(worker)
-        self.thread_pool.start(worker)
-
-    def _on_ocr_done(self, text: str) -> None:
-        self.ocr_btn.setEnabled(True)
-        if not text:
-            self.statusBar().showMessage("已取消 OCR 或未辨識到日文。", 3500)
-            return
-        self._ingest_sentence(text, source="ocr")
-        self.statusBar().showMessage(f"📷 OCR 辨識成功：{text[:34]}", 4500)
-
-    def _on_ocr_failed(self, err: str) -> None:
-        self.ocr_btn.setEnabled(True)
-        QMessageBox.warning(self, "OCR 失敗", err)
-
+    # === 覆蓋層、學習藍圖、mpv 影片橋接與工具視窗 ===
     def _toggle_overlay(self, checked: bool) -> None:
         if checked:
             self._apply_stage_ui()
@@ -1622,6 +1865,10 @@ class MainWindow(QMainWindow):
             self.overlay_btn.blockSignals(True)
             self.overlay_btn.setChecked(visible)
             self.overlay_btn.blockSignals(False)
+        if hasattr(self, "_tray_overlay_act"):
+            self._tray_overlay_act.blockSignals(True)
+            self._tray_overlay_act.setChecked(visible)
+            self._tray_overlay_act.blockSignals(False)
         if self.mpv_bridge.is_connected:
             if visible and self.config.overlay_replace_mode:
                 self.mpv_bridge.set_native_subtitle_visible(False)
@@ -1774,21 +2021,29 @@ class MainWindow(QMainWindow):
             self._background_sync_anki()
 
     def _retokenize_current(self) -> None:
-        if self._current_record is not None:
-            self._current_record.tokenized = self.tokenizer.tokenize(
-                self._current_record.raw_text, self.store.known_words
-            )
-            self._current_record.grammar_analysis = self.grammar_engine.analyze(
-                self._current_record.tokenized
-            )
-            self._display_record(self._current_record)
+        if self._closing or self._current_record is None:
+            return
+        self._current_record.tokenized = self.tokenizer.tokenize(
+            self._current_record.raw_text, self.store.known_words
+        )
+        self._current_record.grammar_analysis = self.grammar_engine.analyze(
+            self._current_record.tokenized
+        )
+        self._display_record(self._current_record)
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        if self._tray_available and self.config.start_in_tray_overlay and not self._force_quit:
+            event.ignore()
+            self.hide()
+            return
         self._closing = True
         self.hook_manager.detach()
         self.mpv_bridge.stop()
+        self.undo_toast.close()
         self.overlay.shutdown_window_pin()
         self.overlay.close()
+        if self.tray_icon is not None:
+            self.tray_icon.hide()
         self.ingestion.shutdown()
         self.voice_packs.close()
         self.progress_store.close()

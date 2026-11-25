@@ -49,6 +49,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="啟動 GUI 並載入原攻略經典範例句",
     )
+    parser.add_argument(
+        "--window",
+        action="store_true",
+        help="啟動時直接開啟主控制台視窗（預設收進系統匣、只顯示字幕覆蓋層）",
+    )
     args = parser.parse_args(argv)
     config = AppConfig.load()
 
@@ -74,7 +79,17 @@ def main(argv: list[str] | None = None) -> int:
     app.setStyleSheet(build_stylesheet(config.ui_theme))
 
     window = MainWindow(config=config, load_demo=args.demo)
-    window.show()
+    if config.start_in_tray_overlay and window._tray_available and not args.window and not args.demo:
+        app.setQuitOnLastWindowClosed(False)
+        window.show_overlay_only_mode()
+        window.undo_toast.show_info(
+            "🌸 GalAnki 已於系統匣待命｜覆蓋層已開啟（懸停查詞・一鍵收錄・點系統匣開控制台）",
+            duration_ms=4200,
+        )
+    else:
+        if window._tray_available and config.start_in_tray_overlay:
+            app.setQuitOnLastWindowClosed(False)
+        window.show()
     return app.exec()
 
 
