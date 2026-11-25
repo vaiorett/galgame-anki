@@ -58,29 +58,29 @@ class SentenceGrammarAnalysis:
                     f'background:rgba(127,127,127,0.09); border-radius:6px; font-size:12.5px;">'
                     f'<b>{html.escape(surf)}</b>{tag_part}{m_part}</span>'
                 )
-            blocks.append(f'<div style="font-weight:700; color:{accent_color}; margin-bottom:4px;">🧭 日語語序直譯骨架（由左到右理解句意）</div>')
+            blocks.append(f'<div style="font-weight:700; color:{accent_color}; margin-bottom:4px;">語序骨架</div>')
             blocks.append(f'<div style="margin-bottom:9px; line-height:1.9;">{"".join(chips)}</div>')
 
         if self.grammar_hits:
-            blocks.append(f'<div style="font-weight:700; color:{accent_color}; margin-bottom:6px;">🧩 本句偵測到的核心句型</div>')
+            blocks.append(f'<div style="font-weight:700; color:{accent_color}; margin-bottom:6px;">句型拆解</div>')
             for hit in self.grammar_hits:
                 blocks.append(
                     f'<div style="margin-bottom:8px; padding:7px 10px; border-left:3px solid {accent_color}; '
                     f'background:rgba(127,127,127,0.07); border-radius:6px;">'
                     f'<div><b>[{html.escape(hit.level)}] {html.escape(hit.name)}</b> '
-                    f'<span style="font-size:11px; color:{muted_color};">({html.escape(hit.category)} · 命中「{html.escape(hit.matched_text)}」)</span></div>'
-                    f'<div style="font-size:12px; color:{muted_color}; margin:2px 0;">公式：{html.escape(hit.formula)}</div>'
+                    f'<span style="font-size:11px; color:{muted_color};">{html.escape(hit.category)} · 「{html.escape(hit.matched_text)}」</span></div>'
+                    f'<div style="font-size:12px; color:{muted_color}; margin:2px 0;">接續：{html.escape(hit.formula)}</div>'
                     f'<div style="font-size:13px; line-height:1.55;">{html.escape(hit.meaning)}</div>'
                     f'</div>'
                 )
 
         if self.conjugation_notes:
-            blocks.append(f'<div style="font-weight:700; color:{accent_color}; margin:8px 0 4px 0;">🔄 句中動詞／形容詞活用還原</div>')
+            blocks.append(f'<div style="font-weight:700; color:{accent_color}; margin:8px 0 4px 0;">活用還原</div>')
             for note in self.conjugation_notes:
                 blocks.append(f'<div style="font-size:13px; margin:2px 0;">• {html.escape(note)}</div>')
 
         if self.particle_roles:
-            blocks.append(f'<div style="font-weight:700; color:{accent_color}; margin:8px 0 4px 0;">🔗 關鍵助詞骨架角色</div>')
+            blocks.append(f'<div style="font-weight:700; color:{accent_color}; margin:8px 0 4px 0;">助詞功能</div>')
             for p in self.particle_roles[:6]:
                 blocks.append(
                     f'<div style="font-size:13px; margin:3px 0;">'
@@ -91,9 +91,7 @@ class SentenceGrammarAnalysis:
 
         if not blocks:
             return (
-                f'<p style="color:{muted_color};">本句為簡短詞組或基礎語序，'
-                '點擊上方任一單詞或助詞即可查看白話詞性與語法角色；'
-                '想核對自然中文句意可點「🌐 核對句意」或「📋 問 Gemini/GPT」。</p>'
+                f'<p style="color:{muted_color};">本句為基礎詞組，點上方單詞或助詞即可查看詞義與用法。</p>'
             )
         return "".join(blocks)
 
@@ -124,31 +122,31 @@ def explain_pos_friendly(pos_raw: str) -> str:
     tags: list[str] = []
 
     if "v1" in p or "一段" in p or "下一" in p or "上一" in p:
-        tags.append("一段動詞（去る變化，最規則）")
+        tags.append("一段動詞")
     elif "v5" in p or "五段" in p:
-        tags.append("五段動詞（詞尾按あいうえお段變化）")
+        tags.append("五段動詞")
     elif "vs" in p or "サ変" in p:
-        tags.append("サ變動詞（名詞＋する）")
+        tags.append("サ變動詞")
     elif "vk" in p or "カ変" in p:
-        tags.append("カ變動詞（来る不規則）")
+        tags.append("カ變動詞")
     elif p == "v" or "verb" in p or "動詞" in p:
         tags.append("動詞")
 
     if "vt" in p or "他" in pos_raw:
-        tags.append("他動詞（接「〜を」受詞）")
+        tags.append("他動詞")
     elif "vi" in p or "自" in pos_raw:
-        tags.append("自動詞（主語自己發生「〜が」）")
+        tags.append("自動詞")
 
     if "adj-i" in p or "形容詞" in pos_raw:
-        tags.append("い形容詞（去い變く／かった／くない）")
+        tags.append("い形容詞")
     elif "adj-na" in p or "形容動詞" in pos_raw:
-        tags.append("な形容詞（修飾名詞加「な」）")
+        tags.append("な形容詞")
     elif "adv" in p or "副" in pos_raw:
-        tags.append("副詞（修飾動作或程度）")
+        tags.append("副詞")
     elif "conj" in p or "接" in pos_raw:
-        tags.append("接續詞（連接前後邏輯）")
+        tags.append("接續詞")
     elif "exp" in p or "慣用" in pos_raw:
-        tags.append("慣用句型")
+        tags.append("慣用語")
     elif re.search(r"\bn\b", p) or "名" in pos_raw:
         tags.append("名詞")
 
@@ -197,6 +195,7 @@ class OfflineGrammarEngine:
         data_path = Path(__file__).resolve().parent.parent / "data" / "grammar_blueprint.json"
         raw: dict[str, Any] = json.loads(data_path.read_text(encoding="utf-8"))
 
+        self.domains: list[str] = list(raw.get("domains", []))
         self.particles: dict[str, ParticleInfo] = {}
         for item in raw.get("particles", []):
             p = ParticleInfo(
@@ -213,6 +212,8 @@ class OfflineGrammarEngine:
         for pat in raw.get("patterns", []):
             self.patterns.append(pat)
             self._compiled.append((re.compile(pat["regex"]), pat))
+        if not self.domains:
+            self.domains = list(dict.fromkeys(p.get("category", "") for p in self.patterns if p.get("category")))
 
     def get_particle_info(self, surface: str) -> ParticleInfo | None:
         return self.particles.get(surface)
@@ -245,8 +246,10 @@ class OfflineGrammarEngine:
                     )
                 )
 
-        # 依難度由淺到深排列（N5 -> N1）
-        level_rank = {"N5": 1, "N4": 2, "N3": 3, "N2": 4, "N1": 5}
+        # 依難度由淺到深排列（N5 -> N1 -> 口語），若已命中 n5_teiru 則不重複顯示同片語 col_teru_teta
+        if "n5_teiru" in seen_ids and "col_teru_teta" in seen_ids:
+            hits = [h for h in hits if h.pattern_id != "col_teru_teta"]
+        level_rank = {"N5": 1, "N4": 2, "N3": 3, "N2": 4, "N1": 5, "口語": 6}
         hits.sort(key=lambda h: level_rank.get(h.level, 9))
 
         # 擷取句中出現的核心助詞（不重複）

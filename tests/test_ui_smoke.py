@@ -38,7 +38,7 @@ class TestUISmoke(unittest.TestCase):
         popup = OverlayLookupPopup()
         self.addCleanup(popup.close)
         popup.popup_for_token(token, "monolingual", False)
-        self.assertEqual(popup.def_label.text(), "🎯 速く移動する")
+        self.assertEqual(popup.def_label.text(), "速く移動する")
         match.monolingual_entries.clear()
         match.bilingual_entries.append(DictEntry("走る", "はしる", "", ["奔跑"], "日中", "bilingual"))
         popup.popup_for_token(token, "monolingual", False)

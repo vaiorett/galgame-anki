@@ -83,8 +83,8 @@ class CardForgeDialog(QDialog):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("✨ Refold 精煉製卡（聚焦重點・語境相關・聯想記憶）")
-        self.resize(670, 620)
+        self.setWindowTitle("編輯 Anki 卡片")
+        self.resize(610, 540)
 
         self._raw_sentence = raw_sentence
         self._pitch_accent = pitch_accent
@@ -139,21 +139,21 @@ class CardForgeDialog(QDialog):
         root.setContentsMargins(16, 14, 16, 14)
         root.setSpacing(10)
 
-        # --- 頂部：階段選擇＋最小資訊原則提示 ---
+        # --- 頂部：階段選擇 ---
         top = QHBoxLayout()
-        tip = QLabel("💡 <b>好卡片原則</b>：一張卡只留本句真正用的 1 條意思＋聲優原聲＋畫面，拒絕死背大字典！")
+        tip = QLabel("卡片模式")
         tip.setObjectName("MutedLabel")
-        tip.setWordWrap(True)
-        top.addWidget(tip, 1)
+        top.addWidget(tip)
 
         self.stage_combo = QComboBox()
-        self.stage_combo.addItem("Lv.1 讀音破冰卡", "lv1")
-        self.stage_combo.addItem("Lv.2 1T 音畫語境卡", "lv2")
-        self.stage_combo.addItem("Lv.3 日日單語卡", "lv3")
+        self.stage_combo.addItem("Lv.1 假名輔助", "lv1")
+        self.stage_combo.addItem("Lv.2 雙語句卡", "lv2")
+        self.stage_combo.addItem("Lv.3 日日單語", "lv3")
         idx = self.stage_combo.findData(stage_mode)
         if idx >= 0:
             self.stage_combo.setCurrentIndex(idx)
         top.addWidget(self.stage_combo)
+        top.addStretch()
         root.addLayout(top)
 
         # --- 1. 語境原句 & 焦點詞 ---
@@ -183,10 +183,9 @@ class CardForgeDialog(QDialog):
         sl.addLayout(row_word)
         self._refresh_pitch_graph()
 
-        # 若詞形有多個候選原形（如 あった -> ある / 会う / 合う），支援 1 秒直接切換！
         if self._alt_lemmas:
             alt_row = QHBoxLayout()
-            alt_lbl = QLabel("🔄 切換其他候選詞：")
+            alt_lbl = QLabel("其他原形：")
             alt_lbl.setObjectName("MutedLabel")
             alt_row.addWidget(alt_lbl)
             for alt_lemma, alt_rd, alt_bi, alt_mono in self._alt_lemmas[:3]:
@@ -202,34 +201,32 @@ class CardForgeDialog(QDialog):
             sl.addLayout(alt_row)
 
         sent_row = QHBoxLayout()
-        sent_row.addWidget(QLabel("卡片原句："))
+        sent_row.addWidget(QLabel("原句："))
         self.sentence_edit = QLineEdit(sentence_highlighted)
-        self.sentence_edit.setToolTip("Lv.1 可刪減為簡短詞組（如「南に位置」），Lv.2–3 建議保留完整自然語境句")
         sent_row.addWidget(self.sentence_edit, 1)
         sl.addLayout(sent_row)
 
         tr_row = QHBoxLayout()
-        tr_row.addWidget(QLabel("整句理解："))
+        tr_row.addWidget(QLabel("句意："))
         self.trans_edit = QLineEdit(sentence_translation)
-        self.trans_edit.setPlaceholderText("用自己的話寫 1 句自然理解，或點右側「🌐 核對句意」…")
+        self.trans_edit.setPlaceholderText("輸入本句中文理解，或點右側取得參考譯文…")
         tr_row.addWidget(self.trans_edit, 1)
 
-        self.trans_btn = QPushButton("🌐 核對句意")
-        self.trans_btn.setToolTip("按需取得自然中文參考句意（零付費 API），幫助你先完全理解這句話")
+        self.trans_btn = QPushButton("核對句意")
         self.trans_btn.clicked.connect(self._fetch_translation)
         tr_row.addWidget(self.trans_btn)
         sl.addLayout(tr_row)
 
         root.addWidget(sent_card)
 
-        # --- 2. 精煉核心釋義（1 點選義項膠囊，絕不硬搬整頁詞典） ---
+        # --- 2. 核心釋義 ---
         def_card = QFrame()
         def_card.setObjectName("CardPanel")
         dl = QVBoxLayout(def_card)
         dl.setContentsMargins(12, 10, 12, 10)
         dl.setSpacing(6)
 
-        dl_head = QLabel("🎯 本句核心意思（點下方膠囊 1 秒挑選，或直接改寫成最直覺的 1 句話）")
+        dl_head = QLabel("本句核心釋義")
         dl_head.setStyleSheet("font-weight: 700; background: transparent;")
         dl.addWidget(dl_head)
 
@@ -241,7 +238,7 @@ class CardForgeDialog(QDialog):
                 short = prefix + sense[:20] + ("…" if len(sense) > 20 else "")
                 btn = QPushButton(short)
                 btn.setToolTip(
-                    f"語境相關度最高 · 點擊填入：{sense}" if idx == 0 else f"點擊填入：{sense}"
+                    f"最相關 · 點擊填入：{sense}" if idx == 0 else f"點擊填入：{sense}"
                 )
                 btn.clicked.connect(lambda _c=False, s=sense: self.bi_edit.setPlainText(s))
                 chip_row.addWidget(btn)
@@ -249,23 +246,22 @@ class CardForgeDialog(QDialog):
             dl.addLayout(chip_row)
 
         self.bi_edit = QTextEdit()
-        self.bi_edit.setMaximumHeight(54)
-        self.bi_edit.setPlaceholderText("只留這句話中真正對應的 1 行中文核心重點（已自動去除多本詞典重複義項）…")
+        self.bi_edit.setMaximumHeight(52)
+        self.bi_edit.setPlaceholderText("填寫本句核心中文意思…")
         self.bi_edit.setPlainText(default_bi)
         dl.addWidget(self.bi_edit)
 
-        mono_lbl = QLabel("🗾 日日單語核心釋義（Lv.3 主顯示 / Lv.1–2 進階折疊）：")
+        mono_lbl = QLabel("單語釋義（Lv.3 主顯示 / Lv.1–2 折疊）")
         mono_lbl.setObjectName("MutedLabel")
         dl.addWidget(mono_lbl)
 
         self.mono_edit = QTextEdit()
-        self.mono_edit.setMaximumHeight(44)
-        self.mono_edit.setPlaceholderText("已啟用日日單語詞典時自動填入（Lv.1–2 可留空，絕不重複塞入中文）…")
+        self.mono_edit.setMaximumHeight(42)
+        self.mono_edit.setPlaceholderText("日日單語釋義（選填）…")
         self.mono_edit.setPlainText(default_mono)
         dl.addWidget(self.mono_edit)
 
-        # CETPath 啟發：🌳 聯想記憶樹附帶勾選與 1 行精簡預覽
-        self.include_related_chk = QCheckBox("🌳 附帶聯想記憶樹（同漢字詞族・搭配・自他/同音辨析，收進背面折疊區）")
+        self.include_related_chk = QCheckBox("附帶關聯詞（易混辨析・同字詞族・複合詞，背面折疊）")
         self.include_related_chk.setChecked(bool(self._related_words_html))
         self.include_related_chk.setEnabled(bool(self._related_words_html))
         dl.addWidget(self.include_related_chk)
@@ -277,17 +273,16 @@ class CardForgeDialog(QDialog):
 
         root.addWidget(def_card)
 
-        # --- 3. 音畫情景記憶區（聲優原聲 ＋ 遊戲/動畫畫面 CG） ---
+        # --- 3. 語音與畫面 ---
         media_card = QFrame()
         media_card.setObjectName("CardPanel")
         ml = QHBoxLayout(media_card)
         ml.setContentsMargins(12, 10, 12, 10)
         ml.setSpacing(12)
 
-        # 左側：聲優原聲語音控制
         aud_col = QVBoxLayout()
         aud_col.setSpacing(6)
-        self.include_audio_chk = QCheckBox("🔊 附帶聲優原聲語音 (.mp3)")
+        self.include_audio_chk = QCheckBox("附帶原聲語音 (.mp3)")
         self.include_audio_chk.setChecked(include_audio_default)
         aud_col.addWidget(self.include_audio_chk)
 
@@ -297,29 +292,28 @@ class CardForgeDialog(QDialog):
         aud_col.addWidget(self.audio_status_lbl)
 
         aud_btns = QHBoxLayout()
-        self.play_btn = QPushButton("▶ 試聽")
+        self.play_btn = QPushButton("試聽")
         self.play_btn.clicked.connect(self._play_audio)
         aud_btns.addWidget(self.play_btn)
         aud_btns.addStretch()
         aud_col.addLayout(aud_btns)
         ml.addLayout(aud_col, 1)
 
-        # 右側：遊戲/動畫 CG 截圖預覽
         shot_col = QVBoxLayout()
         shot_col.setSpacing(5)
-        self.include_shot_chk = QCheckBox("🖼 附帶當下畫面 CG")
+        self.include_shot_chk = QCheckBox("附帶當下畫面")
         self.include_shot_chk.setChecked(include_screenshot_default)
         shot_col.addWidget(self.include_shot_chk)
 
-        self.shot_preview = QLabel("尚未截取畫面")
+        self.shot_preview = QLabel("無畫面")
         self.shot_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.shot_preview.setFixedSize(168, 95)
+        self.shot_preview.setFixedSize(160, 90)
         self.shot_preview.setStyleSheet(
             "border: 1px dashed rgba(140,120,150,0.45); border-radius: 8px; font-size: 11px;"
         )
         shot_col.addWidget(self.shot_preview)
 
-        self.reshot_btn = QPushButton("📷 重拍畫面")
+        self.reshot_btn = QPushButton("重拍畫面")
         self.reshot_btn.setEnabled(self._capture_shot_fn is not None)
         self.reshot_btn.clicked.connect(self._recapture_shot)
         shot_col.addWidget(self.reshot_btn)
@@ -327,9 +321,8 @@ class CardForgeDialog(QDialog):
 
         root.addWidget(media_card)
 
-        # --- 底部確認列 ---
         bottom = QHBoxLayout()
-        hint_k = QLabel("快捷鍵 Ctrl+Enter 立即收錄")
+        hint_k = QLabel("Ctrl+Enter 寫入")
         hint_k.setObjectName("MutedLabel")
         bottom.addWidget(hint_k)
         bottom.addStretch()
@@ -338,7 +331,7 @@ class CardForgeDialog(QDialog):
         cancel_btn.clicked.connect(self.reject)
         bottom.addWidget(cancel_btn)
 
-        self.confirm_btn = QPushButton("✨ 寫入 Anki（音畫精煉記憶卡）")
+        self.confirm_btn = QPushButton("寫入 Anki")
         self.confirm_btn.setObjectName("MineBtn")
         self.confirm_btn.clicked.connect(self._confirm)
         bottom.addWidget(self.confirm_btn)

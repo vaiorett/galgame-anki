@@ -185,7 +185,7 @@ class TestAnkiAndOfflineGrammar(unittest.TestCase):
         self.assertNotIn("#60a5fa", CARD_CSS)
         self.assertIn("lv1-reading-hero", BACK_TEMPLATE)
         self.assertIn("SentenceTranslation", BACK_TEMPLATE)
-        self.assertIn("語序骨架", BACK_TEMPLATE)
+        self.assertIn("句型拆解", BACK_TEMPLATE)
 
         known = anki.fetch_known_words("Galgame日語")
         self.assertIn("募る", known)

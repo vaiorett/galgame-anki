@@ -44,7 +44,7 @@ galgame_anki/
 │   ├── dictionary.py        # SQLite 詞典庫（RLock 執行緒安全、Yomitan 匯入、跨詞典語意原子去重、例句/ISBN/詞性雜訊過濾）
 │   ├── context_meaning.py   # 活用語境直覺譯義（如 わかった → 明白了）＋中譯／日語語法線索相關性重排
 │   ├── word_associations.py # 離線日語「🌳 聯想記憶樹」（同漢字詞族以熟帶生・常用複合詞・自他/同音易混・防劇透作品重現）
-│   ├── grammar_engine.py    # 離線 N5→N1 51 條句型 + 18 助詞白話角色 + 語序骨架 + 免費句意翻譯 + Web AI 提問詞
+│   ├── grammar_engine.py    # 離線 N5→N1＋口語 173 條句型（8 大領域）+ 24 助詞 + 語序骨架 + 免費譯文 + Web AI 提問詞
 │   ├── learning_progress.py # SQLite 實戰語法解鎖進度
 │   ├── hook_cleaner.py      # Textractor 漸進前綴重繪與重複字元清理
 │   ├── anki_client.py       # AnkiConnect 客戶端 + Anki 26 collection.anki2 FSRS 偵測

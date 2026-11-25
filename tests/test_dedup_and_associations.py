@@ -291,7 +291,7 @@ class TestDedupAndAssociations(unittest.TestCase):
         self.assertIn("言い募る", anki_html)
         self.assertIn("✓", anki_html)
         panel_html = tree_sekai.to_panel_html("sakura")
-        self.assertIn("本作品其他出現場景", panel_html)
+        self.assertIn("劇本例句", panel_html)
 
         # 6) AnkiConnectClient 寫入 RelatedWords 欄位
         client = AnkiConnectClient("http://127.0.0.1:8765")

@@ -83,8 +83,8 @@ def main(argv: list[str] | None = None) -> int:
         app.setQuitOnLastWindowClosed(False)
         window.show_overlay_only_mode()
         window.undo_toast.show_info(
-            "🌸 GalAnki 已於系統匣待命｜覆蓋層已開啟（懸停查詞・一鍵收錄・點系統匣開控制台）",
-            duration_ms=4200,
+            "GalAnki 已在系統匣待命 · 懸停查詞，左鍵直寫 Anki",
+            duration_ms=4000,
         )
     else:
         if window._tray_available and config.start_in_tray_overlay:

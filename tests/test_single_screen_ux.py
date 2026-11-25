@@ -165,6 +165,76 @@ class TestSingleScreenUX(unittest.TestCase):
             self.assertTrue(cfg.auto_launch_anki)
             dlg.close()
 
+    def test_clean_definitions_compressed_tools_and_comprehensive_grammar_tree(self) -> None:
+        """驗證去重無重複主釋義、零花俏廢話與 emoji、工具選單壓縮、以及 170+ 條 8 領域語法技能樹。"""
+        import re
+        from galgame_anki.core.dictionary import DictEntry
+        from galgame_anki.core.grammar_engine import OfflineGrammarEngine
+        from galgame_anki.core.learning_progress import LearningProgressStore
+        from galgame_anki.ui.blueprint_dialog import LearningBlueprintDialog
+        from galgame_anki.ui.lookup_popup import _format_entries_html
+
+        # 1) 詞典詳情主釋義絕不出現兩次，也不含花俏 emoji 與摺疊說明廢話
+        entries = [
+            DictEntry("世界", "せかい", "n", ["世界、天地、領域"], "core", "bilingual"),
+            DictEntry("世界", "せかい", "n", ["世界、天地、領域\n內心世界"], "wty", "bilingual"),
+            DictEntry("世界", "せかい", "n", ["the world"], "jmdict", "bilingual"),
+        ]
+        html_out = _format_entries_html(
+            entries, "empty", "starlight", context_meaning="世界、天地、領域"
+        )
+        self.assertEqual(html_out.count("世界、天地、領域"), 1)
+        self.assertIn("內心世界", html_out)
+        for noise in ("🎯", "📌", "✨", "非死搬原形詞典", "已自動摺疊"):
+            self.assertNotIn(noise, html_out)
+
+        # 2) 全面語法技能樹：170+ 條涵蓋 N5→N1＋口語，8 大領域，每條 regex 皆命中自身例句
+        grammar = OfflineGrammarEngine()
+        self.assertGreaterEqual(len(grammar.patterns), 170)
+        self.assertEqual(len(grammar.domains), 8)
+        levels = {p["level"] for p in grammar.patterns}
+        self.assertEqual(levels, {"N5", "N4", "N3", "N2", "N1", "口語"})
+        for pat in grammar.patterns:
+            ex_jp = pat["example"].split("（")[0].strip()
+            self.assertIsNotNone(re.search(pat["regex"], ex_jp), f"Regex 未命中例句：{pat['id']}")
+
+        # 3) 語法技能樹視窗篩選：等級 / 領域 / 關鍵字搜尋
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LearningProgressStore(db_path=Path(tmp) / "p.db")
+            self.addCleanup(store.close)
+            bp = LearningBlueprintDialog(grammar, store, 500, "lv2", "starlight")
+            self.addCleanup(bp.close)
+            self.assertEqual(bp.grammar_list.count(), len(grammar.patterns))
+
+            # 切換只看 N1
+            n1_idx = bp.level_filter.findData("N1")
+            bp.level_filter.setCurrentIndex(n1_idx)
+            self.assertGreaterEqual(bp.grammar_list.count(), 25)
+
+            # 搜尋「ざるを得ない」
+            bp.level_filter.setCurrentIndex(0)
+            bp.search_edit.setText("ざるを得ない")
+            self.assertEqual(bp.grammar_list.count(), 1)
+
+            # 4) 檢查工具選單名稱精簡無 emoji
+            cfg = AppConfig(
+                ws_enabled=False,
+                clipboard_watch=False,
+                auto_sync_known_words=False,
+                auto_launch_anki=False,
+            )
+            win = MainWindow(config=cfg, load_demo=True)
+            win.mpv_bridge.stop()
+            self.addCleanup(win.close)
+            tool_labels = [a.text().split("\t")[0] for a in win.more_menu.actions() if not a.isSeparator()]
+            self.assertIn("語法技能樹", tool_labels)
+            self.assertIn("1T 句庫挖礦", tool_labels)
+            self.assertIn("純人聲解包", tool_labels)
+            self.assertIn("角色聽力匯出", tool_labels)
+            self.assertIn("詞典管理", tool_labels)
+            for lbl in tool_labels:
+                self.assertLessEqual(len(lbl), 8, f"工具選單名稱過長：{lbl}")
+
 
 if __name__ == "__main__":
     unittest.main()

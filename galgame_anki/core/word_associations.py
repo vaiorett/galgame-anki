@@ -196,25 +196,25 @@ class WordAssociationTree:
                 f"{n.term}({n.tag}:{_short(n.meaning, 12)})" if n.meaning else f"{n.term}({n.tag})"
                 for n in self.confusables[:2]
             )
-            segs.append(f"⚡ 辨析：{c_txt}")
+            segs.append(f"辨析：{c_txt}")
         if self.kanji_family:
             k_txt = "、".join(
                 f"{'✓' if n.is_known else ''}{n.term}({_short(n.meaning, 12)})" if n.meaning else n.term
                 for n in self.kanji_family[:3]
             )
-            segs.append(f"🌿 同字：{k_txt}")
+            segs.append(f"同字：{k_txt}")
         if self.compounds:
             p_txt = "、".join(n.term for n in self.compounds[:3])
-            segs.append(f"🔗 複合：{p_txt}")
+            segs.append(f"複合：{p_txt}")
         return " ｜ ".join(segs)
 
     def to_panel_html(self, theme_name: str = "sakura") -> str:
-        """輸出主視窗「🌳 聯想記憶樹」分頁的結構化彩色卡片 HTML。"""
+        """輸出主視窗「關聯詞」分頁的乾淨結構化 HTML。"""
         p = get_palette(theme_name)
         if self.is_empty():
             return (
                 f'<p style="color:{p.text_muted}; margin:6px 0;">'
-                "此詞條暫無足夠的同字／搭配／易混詞聯想資料（建議確認已啟用詞頻與雙語詞典）。</p>"
+                "此詞條暫無關聯詞資料。</p>"
             )
 
         blocks: list[str] = []
@@ -222,7 +222,7 @@ class WordAssociationTree:
             roots_str = " · ".join(f"<b>{html.escape(k)}</b>" for k in self.kanji_roots)
             blocks.append(
                 f'<div style="font-size:12px; color:{p.text_muted}; margin-bottom:6px;">'
-                f"🌳 核心漢字詞根：{roots_str}（已學熟詞標記 ✓ 優先排列，以熟帶生）</div>"
+                f"漢字：{roots_str}</div>"
             )
 
         def _render_branch(title: str, nodes: list[RelatedWordNode]) -> None:
@@ -231,14 +231,14 @@ class WordAssociationTree:
             rows: list[str] = []
             for n in nodes:
                 known_badge = (
-                    f'<span style="color:#059669; font-weight:700; font-size:11px;">✓熟詞 </span>'
+                    f'<span style="color:#059669; font-weight:700; font-size:11px;">✓ </span>'
                     if n.is_known
                     else ""
                 )
                 rd = f"「{html.escape(n.reading)}」" if n.reading and n.reading != n.term else ""
                 pt = f" [{html.escape(n.pitch)}]" if n.pitch else ""
                 tag_html = (
-                    f' <span style="color:{p.accent_lilac}; font-size:11px;">〔{html.escape(n.tag)}〕</span>'
+                    f' <span style="color:{p.accent_lilac}; font-size:11px;">{html.escape(n.tag)}</span>'
                     if n.tag
                     else ""
                 )
@@ -255,14 +255,14 @@ class WordAssociationTree:
                 )
             blocks.append(
                 f'<div style="margin-bottom:8px; padding:8px 10px; background:{p.bg_input}; '
-                f'border:1px solid {p.border}; border-radius:10px;">'
+                f'border:1px solid {p.border}; border-radius:8px;">'
                 f'<div style="font-size:12px; font-weight:700; color:{p.accent_pink}; margin-bottom:4px;">{title}</div>'
                 f"{''.join(rows)}</div>"
             )
 
-        _render_branch("⚡ 自他動詞配對 & 同音易混詞辨析", self.confusables)
-        _render_branch("🌿 同漢字詞族（認識一個字帶出一串）", self.kanji_family)
-        _render_branch("🔗 常用複合詞與相關衍生", self.compounds)
+        _render_branch("易混辨析", self.confusables)
+        _render_branch("同字詞族", self.kanji_family)
+        _render_branch("複合詞", self.compounds)
 
         if self.game_recurrences:
             rec_rows = []
@@ -276,16 +276,16 @@ class WordAssociationTree:
                 )
             blocks.append(
                 f'<div style="margin-bottom:4px; padding:8px 10px; background:{p.bg_input}; '
-                f'border:1px solid {p.border}; border-radius:10px;">'
+                f'border:1px solid {p.border}; border-radius:8px;">'
                 f'<div style="font-size:12px; font-weight:700; color:{p.accent_pink}; margin-bottom:4px;">'
-                f"🎬 本作品其他出現場景（強化語境聯想）</div>"
+                f"劇本例句</div>"
                 f"{''.join(rec_rows)}</div>"
             )
 
         return "".join(blocks)
 
     def to_anki_html(self) -> str:
-        """輸出嚴格相容 Anki 原生日間／夜間主題的精簡聯想樹 HTML（不含硬編碼底色）。"""
+        """輸出嚴格相容 Anki 原生日間／夜間主題的精簡關聯詞 HTML。"""
         if self.is_empty():
             return ""
         sections: list[str] = []
@@ -303,9 +303,9 @@ class WordAssociationTree:
                 lis.append(f"<li>{kn}<b>{html.escape(n.term)}</b>{rd}{pt}{tg}{mg}</li>")
             sections.append(f'<div class="rel-group"><div class="rel-title">{title}</div><ul>{"".join(lis)}</ul></div>')
 
-        _sec("⚡ 易混／自他配對", self.confusables, 4)
-        _sec("🌿 同漢字詞族", self.kanji_family, 5)
-        _sec("🔗 相關複合詞", self.compounds, 4)
+        _sec("易混辨析", self.confusables, 4)
+        _sec("同字詞族", self.kanji_family, 5)
+        _sec("複合詞", self.compounds, 4)
         return "".join(sections)
 
 

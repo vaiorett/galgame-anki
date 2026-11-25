@@ -31,7 +31,7 @@ from galgame_anki.ui.theme import get_palette
 # 三套精調視覺小說／動畫底色預設（100% 遮蓋原對話文字，不產生雙字重影）
 BACKDROP_PRESETS: dict[str, dict[str, str]] = {
     "vn_dark": {
-        "label": "🌌 深黑",
+        "label": "深黑",
         "opaque_bg": "rgba(13, 17, 29, 0.985)",
         "translucent_bg": "rgba(13, 17, 29, 0.64)",
         "idle_border": "rgba(148, 163, 184, 0.14)",
@@ -39,7 +39,7 @@ BACKDROP_PRESETS: dict[str, dict[str, str]] = {
         "token_theme": "starlight",
     },
     "vn_paper": {
-        "label": "🌸 暖白",
+        "label": "暖白",
         "opaque_bg": "rgba(255, 250, 253, 0.99)",
         "translucent_bg": "rgba(255, 250, 253, 0.72)",
         "idle_border": "rgba(236, 72, 153, 0.16)",
@@ -47,7 +47,7 @@ BACKDROP_PRESETS: dict[str, dict[str, str]] = {
         "token_theme": "sakura",
     },
     "cinema_black": {
-        "label": "🎬 純黑",
+        "label": "純黑",
         "opaque_bg": "rgba(0, 0, 0, 0.98)",
         "translucent_bg": "rgba(0, 0, 0, 0.62)",
         "idle_border": "rgba(255, 255, 255, 0.08)",
@@ -190,7 +190,7 @@ class OverlayWindow(QWidget):
         cl = QHBoxLayout(self.capsule_bar)
         cl.setContentsMargins(0, 0, 0, 0)
         cl.setSpacing(6)
-        self.capsule_label = QLabel("🌸 無阻沉浸中")
+        self.capsule_label = QLabel("無阻模式")
         cl.addWidget(self.capsule_label)
         cl.addStretch()
         expand_btn = QPushButton("展開字幕")
@@ -206,7 +206,6 @@ class OverlayWindow(QWidget):
 
         root.addWidget(self.container)
 
-        # === 初次使用 1 行浮動引導條（貼齊頂部，絕不推移台詞高度；鎖定或點「知道了」永久隱藏） ===
         self.guide_bar = QFrame(self.container)
         self.guide_bar.setObjectName("OverlayGuide")
         gl = QHBoxLayout(self.guide_bar)
@@ -214,7 +213,7 @@ class OverlayWindow(QWidget):
         gl.setSpacing(6)
 
         self.guide_label = QLabel(
-            "💡 拖到遊戲原本文字上完全蓋住 → 右下角調好大小點「🔒鎖定」→ 滑鼠移開只看這一份字！"
+            "拖到字幕區覆蓋原字 → 調好大小點鎖定 → 滑鼠移開即隱藏按鈕"
         )
         gl.addWidget(self.guide_label, 1)
 
@@ -292,37 +291,37 @@ class OverlayWindow(QWidget):
     def _build_options_menu(self) -> QMenu:
         menu = QMenu(self)
 
-        act_console = QAction("🖥️ 開啟主控制台", self)
+        act_console = QAction("主控制台", self)
         act_console.triggered.connect(self.open_console_requested.emit)
         menu.addAction(act_console)
 
         menu.addSeparator()
 
-        self.act_pin = QAction("📌 永遠置頂於遊戲／mpv 之上", self)
+        self.act_pin = QAction("永遠置頂", self)
         self.act_pin.setCheckable(True)
         self.act_pin.setChecked(True)
         self.act_pin.triggered.connect(self._toggle_always_on_top)
         menu.addAction(self.act_pin)
 
-        self.act_replace = QAction("🎭 實色遮蓋原文字（不看兩份字幕）", self)
+        self.act_replace = QAction("實色遮蓋原字", self)
         self.act_replace.setCheckable(True)
         self.act_replace.setChecked(True)
         self.act_replace.triggered.connect(self._toggle_replace_mode)
         menu.addAction(self.act_replace)
 
-        self.act_backdrop = QAction(f"🎨 切換底色（目前：{BACKDROP_PRESETS[self._backdrop]['label']}）", self)
+        self.act_backdrop = QAction(f"切換底色（{BACKDROP_PRESETS[self._backdrop]['label']}）", self)
         self.act_backdrop.triggered.connect(self._cycle_backdrop)
         menu.addAction(self.act_backdrop)
 
-        act_font_up = QAction("🔠 放大字幕字體 (A+)", self)
+        act_font_up = QAction("放大字體", self)
         act_font_up.triggered.connect(lambda: self._adjust_font_size(+2))
         menu.addAction(act_font_up)
 
-        act_font_down = QAction("🔡 縮小字幕字體 (A-)", self)
+        act_font_down = QAction("縮小字體", self)
         act_font_down.triggered.connect(lambda: self._adjust_font_size(-2))
         menu.addAction(act_font_down)
 
-        self.act_hover = QAction("👆 滑鼠懸停自動查詞", self)
+        self.act_hover = QAction("懸停自動查詞", self)
         self.act_hover.setCheckable(True)
         self.act_hover.setChecked(True)
         self.act_hover.triggered.connect(self._toggle_hover_lookup)
@@ -330,11 +329,11 @@ class OverlayWindow(QWidget):
 
         menu.addSeparator()
 
-        act_merge = QAction("➕ 合併上一句 (Ctrl+J)", self)
+        act_merge = QAction("合併上一句", self)
         act_merge.triggered.connect(self.merge_prev_requested.emit)
         menu.addAction(act_merge)
 
-        act_freeflow = QAction("🌸 縮成角落無阻膠囊", self)
+        act_freeflow = QAction("縮成無阻膠囊", self)
         act_freeflow.triggered.connect(self.toggle_freeflow_mode)
         menu.addAction(act_freeflow)
 
@@ -522,7 +521,7 @@ class OverlayWindow(QWidget):
         self.act_replace.blockSignals(False)
 
         self._backdrop = backdrop if backdrop in BACKDROP_PRESETS else "vn_dark"
-        self.act_backdrop.setText(f"🎨 切換底色（目前：{BACKDROP_PRESETS[self._backdrop]['label']}）")
+        self.act_backdrop.setText(f"切換底色（{BACKDROP_PRESETS[self._backdrop]['label']}）")
 
         self._font_size = max(15, min(38, int(font_size or 23)))
         self._guide_dismissed = bool(guide_dismissed)
@@ -571,14 +570,14 @@ class OverlayWindow(QWidget):
         self.popup.hide()
 
         if self._show_inline_trans and record.sentence_translation:
-            self.inline_trans_label.setText(f"🌐 {record.sentence_translation}")
+            self.inline_trans_label.setText(record.sentence_translation)
             self.inline_trans_label.show()
         else:
             self.inline_trans_label.hide()
 
     def set_inline_translation(self, record: SentenceRecord, text: str) -> None:
         if self._current_record is record and self._show_inline_trans and text:
-            self.inline_trans_label.setText(f"🌐 {text}")
+            self.inline_trans_label.setText(text)
             self.inline_trans_label.show()
 
     def _apply_qt_stay_on_top_flag(self, pinned: bool, reshow: bool = True) -> None:
@@ -600,7 +599,7 @@ class OverlayWindow(QWidget):
         else:
             # X11 / Windows / macOS：透過 Qt 原生 WindowStaysOnTopHint 切換
             self._apply_qt_stay_on_top_flag(checked, reshow=True)
-        self.show_toast("📌 已置頂：永遠浮於遊戲／影片之上" if checked else "📌 已取消置頂")
+        self.show_toast("已置頂" if checked else "已取消置頂")
         self.always_on_top_changed.emit(checked)
         self._emit_state()
 
@@ -614,14 +613,14 @@ class OverlayWindow(QWidget):
         self.act_replace.setChecked(self._replace_mode)
         self.act_replace.blockSignals(False)
         self._update_container_style(active=self._mouse_inside_overlay)
-        self.show_toast("🎭 遮蓋模式：完全蓋住原文字" if checked else "🪟 已切換輕透模式")
+        self.show_toast("遮蓋模式" if checked else "輕透模式")
         self.replace_mode_changed.emit(checked)
         self._emit_state()
 
     def _cycle_backdrop(self) -> None:
         idx = BACKDROP_ORDER.index(self._backdrop) if self._backdrop in BACKDROP_ORDER else 0
         self._backdrop = BACKDROP_ORDER[(idx + 1) % len(BACKDROP_ORDER)]
-        self.act_backdrop.setText(f"🎨 切換底色（目前：{BACKDROP_PRESETS[self._backdrop]['label']}）")
+        self.act_backdrop.setText(f"切換底色（{BACKDROP_PRESETS[self._backdrop]['label']}）")
         self.apply_theme(self._theme_name)
         self.show_toast(f"底色：{BACKDROP_PRESETS[self._backdrop]['label']}")
         self._emit_state()
@@ -647,7 +646,7 @@ class OverlayWindow(QWidget):
             self.guide_bar.hide()
         self.size_grip.setVisible(not checked and self._mouse_inside_overlay and not self._freeflow_mode)
         self._reposition_floating_controls()
-        self.show_toast("🔒 已鎖定位置" if checked else "🔓 已解鎖，可拖曳對齊")
+        self.show_toast("已鎖定位置" if checked else "已解鎖，可拖曳對齊")
         self._emit_state()
 
     def _toggle_hover_lookup(self, checked: bool) -> None:
@@ -656,7 +655,7 @@ class OverlayWindow(QWidget):
         self.act_hover.setChecked(self._hover_lookup)
         self.act_hover.blockSignals(False)
         self.sentence_widget.set_hover_lookup_enabled(self._hover_lookup)
-        self.show_toast("👆 懸停查詞已開啟" if checked else "👆 已改為點擊查詞")
+        self.show_toast("懸停查詞" if checked else "點擊查詞")
         self._emit_state()
 
     def _toggle_inline_trans(self, checked: bool) -> None:
@@ -667,10 +666,10 @@ class OverlayWindow(QWidget):
         if self._current_record is None:
             return
         if self._current_record.sentence_translation:
-            self.inline_trans_label.setText(f"🌐 {self._current_record.sentence_translation}")
+            self.inline_trans_label.setText(self._current_record.sentence_translation)
             self.inline_trans_label.show()
         else:
-            self.inline_trans_label.setText("🌐 正在核對本句自然句意…")
+            self.inline_trans_label.setText("取得譯文中…")
             self.inline_trans_label.show()
             self.translate_requested.emit(self._current_record)
 

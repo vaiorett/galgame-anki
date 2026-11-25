@@ -18,7 +18,12 @@ from PySide6.QtWidgets import (
 )
 
 from galgame_anki.core.context_meaning import format_contextual_meaning
-from galgame_anki.core.dictionary import DictEntry, LookupMatch, extract_concise_senses
+from galgame_anki.core.dictionary import (
+    DictEntry,
+    LookupMatch,
+    _senses_semantically_overlap,
+    extract_concise_senses,
+)
 from galgame_anki.core.grammar_engine import (
     ParticleInfo,
     SentenceGrammarAnalysis,
@@ -34,32 +39,21 @@ def _frequency_hint(freq: int | None) -> str:
     if freq is None:
         return ""
     if freq <= 5000:
-        return f"#{freq}（🔥高頻必收）"
+        return f"#{freq} 高頻"
     if freq <= 15000:
-        return f"#{freq}（✨常用詞）"
-    return f"#{freq}（📖冷門詞看懂即可）"
+        return f"#{freq} 常用"
+    return f"#{freq}"
 
 
 def _format_particle_card_html(particle: ParticleInfo, theme_name: str) -> str:
     p = get_palette(theme_name)
     return (
         f'<div style="margin-bottom:8px; padding:8px 11px; background:{p.pill_ok_bg}; '
-        f'border-left:3.5px solid {p.accent_pink}; border-radius:9px; color:{p.text_primary};">'
+        f'border-left:3px solid {p.accent_pink}; border-radius:8px; color:{p.text_primary};">'
         f'<div style="font-size:12px; font-weight:700; color:{p.accent_pink}; margin-bottom:2px;">'
-        f'🔗 核心助詞 [{html.escape(particle.level)}] — {html.escape(particle.role)}</div>'
-        f'<div style="font-size:12px; color:{p.text_muted}; margin-bottom:3px;">接續公式：{html.escape(particle.formula)}</div>'
-        f'<div style="font-size:14px; line-height:1.6;">{html.escape(particle.meaning)}</div>'
-        f'</div>'
-    )
-
-
-def _format_context_banner_html(ctx_meaning: str, theme_name: str) -> str:
-    p = get_palette(theme_name)
-    return (
-        f'<div style="margin-bottom:8px; padding:8px 11px; background:{p.pill_ok_bg}; '
-        f'border-left:3.5px solid {p.accent_pink}; border-radius:9px; color:{p.text_primary};">'
-        f'<div style="font-size:11px; font-weight:700; color:{p.accent_pink}; margin-bottom:2px;">🎯 本句語境意思（非死搬原形詞典）</div>'
-        f'<div style="font-size:15px; font-weight:600; line-height:1.55;">{html.escape(ctx_meaning)}</div>'
+        f'助詞 [{html.escape(particle.level)}] · {html.escape(particle.role)}</div>'
+        f'<div style="font-size:12px; color:{p.text_muted}; margin-bottom:3px;">接續：{html.escape(particle.formula)}</div>'
+        f'<div style="font-size:14px; line-height:1.55;">{html.escape(particle.meaning)}</div>'
         f'</div>'
     )
 
@@ -75,82 +69,98 @@ def _format_entries_html(
     blocks: list[str] = []
     if particle is not None:
         blocks.append(_format_particle_card_html(particle, theme_name))
-    elif context_meaning:
-        blocks.append(_format_context_banner_html(context_meaning, theme_name))
 
     if not entries:
         if not blocks:
             return f'<p style="color:{p.text_muted}; margin:4px 0;">{html.escape(empty_hint)}</p>'
         return "".join(blocks)
 
-    # 1. 重點精簡摘要（跨詞典自動去重，絕不把 4 本詞典的重複意思堆滿畫面）
     focused = extract_concise_senses(entries, max_senses=5)
     is_bilingual = any(e.dict_kind == "bilingual" for e in entries)
     has_zh_focused = is_bilingual and any(any("\u4e00" <= ch <= "\u9fff" for ch in s) for s in focused)
 
-    # 若重點釋義僅 1 條且與頂部語境橫幅完全相同，不重複印第二次
-    show_focused_box = bool(focused) and not (len(focused) == 1 and context_meaning and focused[0] == context_meaning)
-    if show_focused_box:
-        bullet_items = "".join(
-            f'<div style="margin:2px 0; line-height:1.6;">'
-            f'<span style="color:{p.accent_pink}; font-weight:700;">{idx}.</span> {html.escape(s)}</div>'
-            for idx, s in enumerate(focused, start=1)
+    # 核心義項只顯示一次，絕不重複出現兩遍
+    primary = ""
+    is_contextual_override = False
+    if particle is None:
+        if context_meaning:
+            primary = context_meaning
+            is_contextual_override = not focused or (
+                context_meaning != focused[0] and not _senses_semantically_overlap(context_meaning, focused[0])
+            )
+        elif focused:
+            primary = focused[0]
+
+    other_senses = [
+        s
+        for s in focused
+        if s and (not primary or (s != primary and not _senses_semantically_overlap(s, primary)))
+    ]
+
+    if primary:
+        eyebrow = (
+            f'<div style="font-size:11px; font-weight:700; color:{p.accent_pink}; margin-bottom:2px;">本句義</div>'
+            if is_contextual_override
+            else ""
         )
         blocks.append(
-            f'<div style="margin-bottom:8px; padding:8px 10px; background:{p.bg_input}; '
-            f'border:1px solid {p.border}; border-radius:10px;">'
-            f'<div style="font-size:11px; color:{p.accent_pink}; margin-bottom:3px; font-weight:700;">'
-            f'📌 去重重點釋義（已自動過濾重複詞典與例句雜訊）</div>'
-            f'<div style="font-size:14px; color:{p.text_primary};">{bullet_items}</div>'
-            f"</div>"
+            f'<div style="margin-bottom:8px; padding:9px 12px; background:{p.pill_ok_bg}; '
+            f'border-left:3px solid {p.accent_pink}; border-radius:8px; color:{p.text_primary};">'
+            f'{eyebrow}'
+            f'<div style="font-size:15px; font-weight:600; line-height:1.55;">{html.escape(primary)}</div>'
+            f'</div>'
         )
 
-    # 2. 補充來源明細：只列出真正有額外資訊的不同詞典，避免與上方重點重複堆砌
-    focused_set = set(focused)
-    if context_meaning:
-        focused_set.add(context_meaning)
+    if other_senses:
+        start_idx = 2 if primary else 1
+        bullet_items = "".join(
+            f'<div style="margin:2px 0; line-height:1.55;">'
+            f'<span style="color:{p.text_muted}; font-weight:600;">{idx}.</span> {html.escape(s)}</div>'
+            for idx, s in enumerate(other_senses, start=start_idx)
+        )
+        blocks.append(
+            f'<div style="margin-bottom:8px; padding:8px 11px; background:{p.bg_input}; '
+            f'border:1px solid {p.border}; border-radius:8px; font-size:13.5px; color:{p.text_primary};">'
+            f'{bullet_items}</div>'
+        )
+
+    # 僅在額外詞典提供真正不同的新義項時補充（最多 1 條，不輸出摺疊廢話）
+    covered = [s for s in ([primary] + other_senses) if s]
     shown_dicts: set[str] = set()
-    skipped_extra = 0
     for entry in entries[:6]:
         if entry.dict_name in shown_dicts:
-            skipped_extra += 1
             continue
         per_senses = extract_concise_senses([entry], max_senses=3)
         if not per_senses:
-            skipped_extra += 1
             continue
         if has_zh_focused and not any(any("\u4e00" <= ch <= "\u9fff" for ch in s) for s in per_senses):
-            skipped_extra += 1
             continue
-        # 若該詞典所有精煉義項已完全包含於上方重點框，則摺疊計入去重提示，不重複顯示！
-        if set(per_senses) <= focused_set:
-            skipped_extra += 1
+        novel = [
+            s for s in per_senses
+            if not any(s == c or _senses_semantically_overlap(s, c) for c in covered)
+        ]
+        if not novel:
             continue
         shown_dicts.add(entry.dict_name)
+        covered.extend(novel)
         dict_tag = html.escape(entry.dict_name)
         friendly_pos = explain_pos_friendly(entry.pos)
-        pos_display = friendly_pos or entry.pos
         pos_tag = (
-            f' <span style="color:{p.accent_lilac};">〔{html.escape(pos_display)}〕</span>'
-            if pos_display
+            f' <span style="color:{p.accent_lilac};">· {html.escape(friendly_pos)}</span>'
+            if friendly_pos
             else ""
         )
-        gloss_lines = "<br>".join(html.escape(s) for s in per_senses)
+        gloss_lines = "<br>".join(html.escape(s) for s in novel[:2])
         blocks.append(
             f'<div style="margin-bottom:6px; padding:7px 10px; background:{p.bg_input}; '
-            f'border:1px solid {p.border}; border-radius:9px;">'
+            f'border:1px solid {p.border}; border-radius:8px;">'
             f'<div style="font-size:11px; color:{p.text_muted}; margin-bottom:2px; font-weight:600;">{dict_tag}{pos_tag}</div>'
-            f'<div style="font-size:13.5px; line-height:1.55; color:{p.text_primary};">{gloss_lines}</div>'
+            f'<div style="font-size:13.5px; line-height:1.5; color:{p.text_primary};">{gloss_lines}</div>'
             f"</div>"
         )
-        if len(shown_dicts) >= 2:
+        if len(shown_dicts) >= 1:
             break
 
-    if skipped_extra > 0:
-        blocks.append(
-            f'<div style="font-size:11px; color:{p.text_muted}; margin-top:2px;">'
-            f"✨ 已自動摺疊 {skipped_extra} 條重複或英文備援詞條，只保留核心重點。</div>"
-        )
     return "".join(blocks)
 
 
@@ -193,21 +203,21 @@ class LookupDetailPanel(QFrame):
         top.addWidget(self.meta_label)
         top.addStretch()
 
-        self.audio_btn = QPushButton("🔊 試聽")
+        self.audio_btn = QPushButton("試聽")
         self.audio_btn.setToolTip("試聽這句台詞的原聲語音 (Ctrl+P)")
         self.audio_btn.clicked.connect(self.audio_preview_requested.emit)
         top.addWidget(self.audio_btn)
 
-        self.prompt_btn = QPushButton("📋 問 AI")
+        self.prompt_btn = QPushButton("複製 AI 提問")
         self.prompt_btn.setObjectName("AccentBtn")
-        self.prompt_btn.setToolTip("一鍵複製結構化日語拆解提問詞，直接貼給 Google AI Pro 或 ChatGPT Plus")
+        self.prompt_btn.setToolTip("複製結構化日語拆解提問詞，貼給 Gemini / ChatGPT")
         self.prompt_btn.clicked.connect(self._emit_copy_prompt)
         top.addWidget(self.prompt_btn)
 
-        self.mine_btn = QPushButton("✨ 一鍵收錄")
+        self.mine_btn = QPushButton("一鍵收錄")
         self.mine_btn.setObjectName("MineBtn")
         self.mine_btn.setToolTip(
-            "左鍵直接寫入 Anki（自動挑本句最相關釋義＋原聲＋截圖，右下角可撤銷）；按住 Shift 點擊可先開啟編輯窗 (Ctrl+Enter)"
+            "左鍵直接寫入 Anki（右下角可撤銷）；按住 Shift 點擊可先編輯 (Ctrl+Enter)"
         )
         self.mine_btn.setEnabled(False)
         self.mine_btn.clicked.connect(self._emit_mine)
@@ -227,7 +237,7 @@ class LookupDetailPanel(QFrame):
         self.trace_label.hide()
         layout.addWidget(self.trace_label)
 
-        # 多候選原形 1 點切換列（僅當一詞有多種可能原型如 あった -> ある/会う/合う 時出現）
+        # 多候選原形 1 點切換列
         self.alt_bar = QWidget()
         self.alt_bar.setStyleSheet("background: transparent;")
         self.alt_layout = QHBoxLayout(self.alt_bar)
@@ -236,28 +246,27 @@ class LookupDetailPanel(QFrame):
         self.alt_bar.hide()
         layout.addWidget(self.alt_bar)
 
-        # 雙語 / 日日單語 / 離線本句理解與語法
         self.tabs = QTabWidget()
 
         self.bi_browser = QTextBrowser()
         self.bi_browser.setOpenExternalLinks(False)
         self.bi_browser.setMinimumHeight(110)
-        self.tabs.addTab(self.bi_browser, "雙語釋義")
+        self.tabs.addTab(self.bi_browser, "雙語")
 
         self.mono_browser = QTextBrowser()
         self.mono_browser.setOpenExternalLinks(False)
         self.mono_browser.setMinimumHeight(110)
-        self.tabs.addTab(self.mono_browser, "日日單語")
+        self.tabs.addTab(self.mono_browser, "單語")
 
         self.grammar_browser = QTextBrowser()
         self.grammar_browser.setOpenExternalLinks(False)
         self.grammar_browser.setMinimumHeight(110)
-        self.tabs.addTab(self.grammar_browser, "🧭 理解本句與語法")
+        self.tabs.addTab(self.grammar_browser, "句型拆解")
 
         self.assoc_browser = QTextBrowser()
         self.assoc_browser.setOpenExternalLinks(False)
         self.assoc_browser.setMinimumHeight(110)
-        self.tabs.addTab(self.assoc_browser, "🌳 聯想記憶樹")
+        self.tabs.addTab(self.assoc_browser, "關聯詞")
 
         layout.addWidget(self.tabs, 1)
         self._apply_palette_styles()
@@ -322,35 +331,34 @@ class LookupDetailPanel(QFrame):
         self.show_token(self._current_token, dict_pref, known, p_info)
 
     def set_sentence_analysis(self, analysis: SentenceGrammarAnalysis | None) -> None:
-        """更新第三分頁「🧭 理解本句與語法」（完全離線，每句自動執行）。"""
+        """更新「句型拆解」分頁（離線自動執行）。"""
         self._current_analysis = analysis
         p = get_palette(self._theme_name)
         if analysis is None:
-            self.tabs.setTabText(2, "🧭 理解本句與語法")
+            self.tabs.setTabText(2, "句型拆解")
             self.grammar_browser.setHtml(
-                f'<p style="color:{p.text_muted};">收到日語台詞或字幕後，這裡會自動生成日語語序直譯骨架與 N5→N1 核心句型拆解。</p>'
+                f'<p style="color:{p.text_muted};">收到日語台詞後會自動拆解語序骨架與 N5→N1 句型。</p>'
             )
             return
 
         hit_cnt = len(analysis.grammar_hits)
-        tab_title = f"🧭 理解本句與語法 ({hit_cnt})" if hit_cnt else "🧭 理解本句與語法"
-        self.tabs.setTabText(2, tab_title)
+        self.tabs.setTabText(2, f"句型拆解 ({hit_cnt})" if hit_cnt else "句型拆解")
         self.grammar_browser.setHtml(
             analysis.to_compact_html(accent_color=p.accent_pink, muted_color=p.text_muted)
         )
 
     def set_word_associations(self, tree: WordAssociationTree | None) -> None:
-        """更新第四分頁「🌳 聯想記憶樹」（同漢字詞族・常用複合・自他／同音易混詞）。"""
+        """更新「關聯詞」分頁（易混辨析・同字詞族・複合詞・劇本例句）。"""
         self._current_assoc = tree
         p = get_palette(self._theme_name)
         if tree is None or tree.is_empty():
-            self.tabs.setTabText(3, "🌳 聯想記憶樹")
+            self.tabs.setTabText(3, "關聯詞")
             self.assoc_browser.setHtml(
-                f'<p style="color:{p.text_muted}; margin:6px 0;">點擊上方任意單詞，這裡會自動展開同漢字詞族（以熟帶生）、常用複合詞與自他／同音易混詞。</p>'
+                f'<p style="color:{p.text_muted}; margin:6px 0;">點選單詞後顯示同字詞族、複合詞與自他／同音辨析。</p>'
             )
             return
         cnt = tree.total_nodes()
-        self.tabs.setTabText(3, f"🌳 聯想記憶樹 ({cnt})" if cnt else "🌳 聯想記憶樹")
+        self.tabs.setTabText(3, f"關聯詞 ({cnt})" if cnt else "關聯詞")
         self.assoc_browser.setHtml(tree.to_panel_html(self._theme_name))
 
     def show_token(
@@ -380,7 +388,7 @@ class LookupDetailPanel(QFrame):
         if already_known:
             meta_parts.append("✓ 已知")
         elif token.is_1t_candidate:
-            meta_parts.append("★ 1T 推薦")
+            meta_parts.append("1T")
         self.meta_label.setText(" · ".join(meta_parts))
         self.pitch_widget.set_pitch(
             reading=reading or lemma,
@@ -390,27 +398,26 @@ class LookupDetailPanel(QFrame):
 
         trace_parts: list[str] = []
         if particle_info is not None:
-            trace_parts.append(f"🔗 助詞 [{particle_info.level}] {particle_info.role}")
+            trace_parts.append(f"助詞 [{particle_info.level}] {particle_info.role}")
         elif match and match.all_entries:
             pos_friendly = explain_pos_friendly(match.all_entries[0].pos)
             if pos_friendly:
-                trace_parts.append(f"🏷 {pos_friendly}")
+                trace_parts.append(pos_friendly)
 
         if token.surface != lemma:
-            trace_parts.append(f"活用還原：{token.surface} → {lemma}")
+            trace_parts.append(f"原形：{token.surface} → {lemma}")
         if match and match.reasons:
             trace_parts.append(" → ".join(match.reasons))
 
         if trace_parts:
-            self.trace_label.setText("　｜　".join(trace_parts))
+            self.trace_label.setText(" ｜ ".join(trace_parts))
             self.trace_label.show()
         else:
             self.trace_label.hide()
 
-        # 顯示多候選 1 點切換按鈕（若存在歧義詞形）
         self._clear_alt_bar()
         if match and match.alt_matches and particle_info is None:
-            lbl = QLabel("🔄 其他可能原形：")
+            lbl = QLabel("其他原形：")
             lbl.setObjectName("MutedLabel")
             self.alt_layout.addWidget(lbl)
             for alt in match.alt_matches[:3]:
@@ -421,7 +428,7 @@ class LookupDetailPanel(QFrame):
             self.alt_layout.addStretch()
             self.alt_bar.show()
 
-        self.mine_btn.setText("✨ 追加例句" if already_known else "✨ 一鍵收錄")
+        self.mine_btn.setText("追加例句" if already_known else "一鍵收錄")
 
         if match:
             base_bi = match.best_concise_meaning("bilingual", strict=True)
@@ -429,7 +436,7 @@ class LookupDetailPanel(QFrame):
             self.bi_browser.setHtml(
                 _format_entries_html(
                     match.bilingual_entries,
-                    "目前啟用的雙語詞典未收錄此詞，可在「☰ → 📚 詞典管理」調整開啟的詞典。",
+                    "雙語詞典未收錄此詞，可在「工具 → 詞典管理」檢查。",
                     self._theme_name,
                     particle=particle_info,
                     context_meaning=ctx_meaning,
@@ -438,7 +445,7 @@ class LookupDetailPanel(QFrame):
             self.mono_browser.setHtml(
                 _format_entries_html(
                     match.monolingual_entries,
-                    "目前未啟用日日單語詞典或未收錄此詞（Lv.3 階段可在「☰ → 📚 詞典管理」開啟日日單語）。",
+                    "單語詞典未收錄此詞（可在「工具 → 詞典管理」啟用日日詞典）。",
                     self._theme_name,
                     particle=particle_info,
                 )
@@ -449,8 +456,8 @@ class LookupDetailPanel(QFrame):
             self.mono_browser.setHtml(p_html)
         else:
             no_hit = (
-                f'<p style="color:{p.accent_gold};">目前啟用的詞典暫無「{html.escape(token.surface)}」詞條。</p>'
-                f'<p style="color:{p.text_muted};">可點「📋 問 Gemini/GPT」一鍵複製到網頁版 AI，或在「📚 詞典管理」確認已啟用的詞典。</p>'
+                f'<p style="color:{p.accent_gold};">詞典無「{html.escape(token.surface)}」詞條。</p>'
+                f'<p style="color:{p.text_muted};">可點「複製 AI 提問」或直接收錄原句。</p>'
             )
             self.bi_browser.setHtml(no_hit)
             self.mono_browser.setHtml(no_hit)
@@ -538,10 +545,10 @@ class OverlayLookupPopup(QFrame):
         btn_row = QHBoxLayout()
         btn_row.setSpacing(6)
 
-        self.mine_btn = QPushButton("✨ 一鍵收錄")
+        self.mine_btn = QPushButton("一鍵收錄")
         self.mine_btn.setObjectName("MineBtn")
         self.mine_btn.setToolTip(
-            "左鍵直接寫入 Anki（原聲＋截圖＋聯想樹，右下角可撤銷）；按住 Shift 點擊可先編輯"
+            "左鍵直接寫入 Anki（原聲＋截圖，右下角可撤銷）；按住 Shift 點擊可先編輯"
         )
         self.mine_btn.clicked.connect(self._on_mine)
         btn_row.addWidget(self.mine_btn, 1)
@@ -661,11 +668,11 @@ class OverlayLookupPopup(QFrame):
 
         meta_lines: list[str] = []
         if particle_info is not None:
-            meta_lines.append(f"🔗 助詞 [{particle_info.level}] {particle_info.role}（{particle_info.formula}）")
+            meta_lines.append(f"助詞 [{particle_info.level}] {particle_info.role}（{particle_info.formula}）")
         elif match and match.all_entries:
             pos_friendly = explain_pos_friendly(match.all_entries[0].pos)
             if pos_friendly:
-                meta_lines.append(f"🏷 {pos_friendly}")
+                meta_lines.append(pos_friendly)
         if match and match.reasons and token.surface != lemma:
             meta_lines.append(f"{token.surface} → {lemma}（{' → '.join(match.reasons)}）")
 
@@ -690,7 +697,7 @@ class OverlayLookupPopup(QFrame):
 
         parts: list[str] = []
         if particle_info is not None:
-            parts.append(f"【助詞用法】{particle_info.meaning}")
+            parts.append(particle_info.meaning)
         elif match:
             kind = dict_preference
             base = match.best_concise_meaning(kind, strict=True)
@@ -698,17 +705,20 @@ class OverlayLookupPopup(QFrame):
                 kind = "bilingual" if kind == "monolingual" else "monolingual"
                 base = match.best_concise_meaning(kind, strict=True)
                 if base:
-                    parts.append("雙語備援" if kind == "bilingual" else "日日詞典備援")
+                    parts.append("雙語備援" if kind == "bilingual" else "日日備援")
             ctx = format_contextual_meaning(token.surface, lemma, base, match.reasons) if kind == "bilingual" else base
             if ctx:
-                parts.append(f"🎯 {ctx}")
-            extra = [s for s in match.concise_senses(kind, max_senses=3, strict=True) if s not in ctx]
+                parts.append(ctx)
+            extra = [
+                s for s in match.concise_senses(kind, max_senses=3, strict=True)
+                if s and (not ctx or (s != ctx and not _senses_semantically_overlap(s, ctx)))
+            ]
             if extra:
-                parts.append("其他義項：" + " ／ ".join(extra[:2]))
+                parts.append("其他：" + " ／ ".join(extra[:2]))
         if not parts:
-            parts.append("詞典暫無此詞條（可按「📋 問AI」複製給 Gemini/GPT，或直接收錄音畫句卡）。")
+            parts.append("詞典暫無此詞條，可直接收錄原句或複製提問。")
 
         self.def_label.setText("\n".join(parts))
-        self.mine_btn.setText("✨ 追加例句（Shift 編輯）" if already_known else "✨ 一鍵收錄（Shift 編輯）")
+        self.mine_btn.setText("追加例句（Shift 編輯）" if already_known else "一鍵收錄（Shift 編輯）")
         self.adjustSize()
         self.show()

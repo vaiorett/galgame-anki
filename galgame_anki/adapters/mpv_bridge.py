@@ -414,7 +414,7 @@ class MpvSubtitleBridge(QObject):
         with self._sock_lock:
             self._active_sock = sock
         self._connected = True
-        self.connection_changed.emit(True, "🎬 mpv 已連線")
+        self.connection_changed.emit(True, "mpv 已連線")
 
         observe_cmds = [
             {"command": ["observe_property", 1, "sub-text"]},

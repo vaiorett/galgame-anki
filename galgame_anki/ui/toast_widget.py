@@ -57,7 +57,7 @@ class FloatingUndoToast(QWidget):
         self.msg_label.setWordWrap(False)
         row.addWidget(self.msg_label)
 
-        self.undo_btn = QPushButton("↩ 撤銷")
+        self.undo_btn = QPushButton("撤銷")
         self.undo_btn.setObjectName("UndoToastBtn")
         self.undo_btn.setFixedHeight(24)
         self.undo_btn.setCursor(Qt.CursorShape.PointingHandCursor)

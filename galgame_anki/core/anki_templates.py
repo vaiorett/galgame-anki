@@ -325,7 +325,7 @@ BACK_TEMPLATE = r"""
 
   <!-- 音畫情景記憶核心（聲優原聲 + 當下遊戲/動畫畫面 CG） -->
   {{#SentenceAudio}}
-  <div class="audio-row">{{SentenceAudio}} <span style="font-size:12px; opacity:0.6;">跟著聲優語氣一起聽與念</span></div>
+  <div class="audio-row">{{SentenceAudio}}</div>
   {{/SentenceAudio}}
 
   {{#Screenshot}}
@@ -353,62 +353,55 @@ BACK_TEMPLATE = r"""
   <!-- AJATT 風格高低音調視覺曲線（支援既有舊卡自動於瀏覽器即時渲染 SVG） -->
   <div class="pitch-graph-row" id="gal-pitch-graph" data-reading="{{TargetReading}}" data-pitch="{{PitchAccent}}">{{PitchGraph}}</div>
 
-  <!-- Lv.1 / Lv.2 主顯示：精煉核心釋義（1~2行，拒絕整頁詞典硬搬） -->
   {{#DefinitionBilingual}}
   <div class="core-meaning primary-bi">
-    <div class="meaning-label">本句核心意思</div>
+    <div class="meaning-label">本句義</div>
     <div>{{DefinitionBilingual}}</div>
   </div>
   {{/DefinitionBilingual}}
 
-  <!-- Lv.3 主顯示：精煉日日單語釋義（登樓撤梯） -->
   {{#DefinitionMonolingual}}
   <div class="core-meaning primary-mono">
-    <div class="meaning-label">日日單語核心釋義</div>
+    <div class="meaning-label">單語釋義</div>
     <div>{{DefinitionMonolingual}}</div>
   </div>
   {{/DefinitionMonolingual}}
 
-  <!-- 本句自然語境理解（Lv.1–2 直接可見，Lv.3 收入安全網） -->
   {{#SentenceTranslation}}
   <div class="context-quote context-primary">
-    <div class="meaning-label">本句語境理解</div>
+    <div class="meaning-label">整句譯文</div>
     <div>{{SentenceTranslation}}</div>
   </div>
   <details class="fold-box context-fold">
-    <summary>整句語境理解（安全網）</summary>
+    <summary>整句譯文</summary>
     <div style="margin-top:6px;">{{SentenceTranslation}}</div>
   </details>
   {{/SentenceTranslation}}
 
-  <!-- Lv.1 / Lv.2 進階對照日日單語 -->
   {{#DefinitionMonolingual}}
   <details class="fold-box secondary-mono">
-    <summary>日日單語對照（進階）</summary>
+    <summary>單語釋義</summary>
     <div style="margin-top:8px; white-space:pre-wrap;">{{DefinitionMonolingual}}</div>
   </details>
   {{/DefinitionMonolingual}}
 
-  <!-- Lv.3 雙語備援安全網 -->
   {{#DefinitionBilingual}}
   <details class="fold-box secondary-bi">
-    <summary>雙語核心釋義（安全網）</summary>
+    <summary>雙語釋義</summary>
     <div style="margin-top:8px; white-space:pre-wrap;">{{DefinitionBilingual}}</div>
   </details>
   {{/DefinitionBilingual}}
 
-  <!-- 語序直譯骨架與句型活用拆解 -->
   {{#AIGrammarNotes}}
   <details class="fold-box">
-    <summary>🧭 語序骨架・句型與助詞拆解</summary>
+    <summary>句型拆解</summary>
     <div class="grammar-body">{{AIGrammarNotes}}</div>
   </details>
   {{/AIGrammarNotes}}
 
-  <!-- CETPath 啟發：🌳 日語詞彙聯想記憶樹（同漢字詞族・常用複合・自他/同音易混） -->
   {{#RelatedWords}}
   <details class="fold-box">
-    <summary>🌳 聯想記憶樹（同漢字詞族・搭配・易混詞）</summary>
+    <summary>關聯詞</summary>
     <div class="grammar-body">{{RelatedWords}}</div>
   </details>
   {{/RelatedWords}}
