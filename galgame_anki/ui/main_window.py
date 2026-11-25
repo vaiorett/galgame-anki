@@ -49,7 +49,7 @@ from galgame_anki.adapters.ocr_engine import capture_region_and_ocr
 from galgame_anki.adapters.text_sources import TextIngestionManager
 from galgame_anki.config import AppConfig
 from galgame_anki.core.anki_client import AnkiCardPayload, AnkiConnectClient
-from galgame_anki.core.context_meaning import format_contextual_meaning
+from galgame_anki.core.context_meaning import format_contextual_meaning, rank_senses_by_context
 from galgame_anki.core.dictionary import DictionaryEngine
 from galgame_anki.core.grammar_engine import (
     OfflineGrammarEngine,
@@ -65,6 +65,7 @@ from galgame_anki.core.tokenizer import (
     highlight_target_in_sentence,
 )
 from galgame_anki.core.voice_pack import VoicePackManager
+from galgame_anki.core.word_associations import WordAssociationEngine, WordAssociationTree
 from galgame_anki.ui.blueprint_dialog import LearningBlueprintDialog
 from galgame_anki.ui.card_forge_dialog import CardForgeDialog, ForgedCardData
 from galgame_anki.ui.extra_dialogs import DifficultyGuideDialog, DictionaryManagerDialog
@@ -109,6 +110,7 @@ class MainWindow(QMainWindow):
         self.anki = AnkiConnectClient(self.config.anki_url)
         self.store = SentenceStore(max_history=50)
         self.voice_packs = VoicePackManager()
+        self.word_associations = WordAssociationEngine(self.dictionary, self.voice_packs)
         self.sentence_bank_scanner = SentenceBankScanner(self.tokenizer, self.dictionary)
         self.ingestion = TextIngestionManager(self)
         self.hook_manager = GameHookManager(self)
@@ -1076,6 +1078,7 @@ class MainWindow(QMainWindow):
         self._show_token_in_panel(token)
 
     def _show_token_in_panel(self, token: Token) -> None:
+        self._selected_token = token
         already_known = token.lemma in self.store.known_words or token.surface in self.store.known_words
         particle_info = self.grammar_engine.get_particle_info(token.surface)
         self.lookup_panel.show_token(
@@ -1084,6 +1087,36 @@ class MainWindow(QMainWindow):
             already_known=already_known,
             particle_info=particle_info,
         )
+        # 離線即時展開「🌳 聯想記憶樹」（同漢字詞族・常用複合・自他/同音易混・本作品重現）
+        req_id = getattr(self, "_assoc_req_id", 0) + 1
+        self._assoc_req_id = req_id
+        self.lookup_panel.set_word_associations(None)
+        match = token.lookup
+        lemma = match.lemma if match else token.lemma
+        reading = match.reading if match else token.reading
+        if particle_info is not None or not lemma:
+            return
+        cur_sent = self._current_record.raw_text if self._current_record else ""
+        pack_id = self._resolve_voice_pack_id(self._current_record) or ""
+        known_snap = set(self.store.known_words)
+
+        def _build() -> WordAssociationTree:
+            return self.word_associations.build_tree(
+                lemma=lemma,
+                reading=reading,
+                known_words=known_snap,
+                current_sentence=cur_sent,
+                active_pack_id=pack_id,
+            )
+
+        worker = FunctionWorker(_build)
+        worker.signals.finished.connect(
+            lambda tree, rid=req_id: self.lookup_panel.set_word_associations(tree)
+            if (not self._closing and getattr(self, "_assoc_req_id", 0) == rid)
+            else None
+        )
+        self._active_workers.append(worker)
+        self.thread_pool.start(worker)
 
     # === 零付費 API：一鍵複製高品質提問詞給 Google AI Pro / ChatGPT Plus ===
     def _on_panel_copy_prompt(self, token: Token | None) -> None:
@@ -1129,9 +1162,16 @@ class MainWindow(QMainWindow):
         lemma = match.lemma if match else token.lemma
         reading = match.reading if match else token.reading
         pitch = "/".join(match.pitches[:3]) if (match and match.pitches) else ""
-        bi_senses = match.concise_senses("bilingual", max_senses=5, strict=True) if match else []
+        raw_bi_senses = match.concise_senses("bilingual", max_senses=5, strict=True) if match else []
         mono_senses = match.concise_senses("monolingual", max_senses=4, strict=True) if match else []
-        base_bi = match.best_concise_meaning("bilingual", strict=True) if match else ""
+        effective_trans = record.sentence_translation or record.pack_translation
+        bi_senses = rank_senses_by_context(
+            raw_bi_senses,
+            sentence_translation=effective_trans,
+            raw_sentence=record.raw_text,
+            target_surface=token.surface,
+        )
+        base_bi = bi_senses[0] if bi_senses else (match.best_concise_meaning("bilingual", strict=True) if match else "")
         default_bi = (
             format_contextual_meaning(token.surface, lemma, base_bi, match.reasons)
             if (match and base_bi)
@@ -1163,10 +1203,24 @@ class MainWindow(QMainWindow):
         grammar_html = analysis.to_compact_html(accent_color="#d9468f", muted_color="#7a7a8c")
         source_name = record.media_title or self.config.current_game_name or record.source
 
-        # 先取出音訊與畫面快照供精煉確認或直寫
+        # 先取出音訊、畫面快照與聯想記憶樹供精煉確認或直寫
         audio_clip = self._extract_audio_for_record(record)
         shot_clip = record.screenshot_clip
         include_audio_default = self.config.capture_audio_on_mine and (audio_clip is not None)
+
+        assoc_html = ""
+        assoc_preview = ""
+        if particle is None and lemma:
+            assoc_tree = self.word_associations.build_tree(
+                lemma=lemma,
+                reading=reading,
+                known_words=self.store.known_words,
+                current_sentence=record.raw_text,
+                active_pack_id=self._resolve_voice_pack_id(record) or "",
+            )
+            if not assoc_tree.is_empty():
+                assoc_html = assoc_tree.to_anki_html()
+                assoc_preview = assoc_tree.to_compact_preview_text()
 
         if self.config.quick_forge_before_mine:
             dlg = CardForgeDialog(
@@ -1190,6 +1244,8 @@ class MainWindow(QMainWindow):
                 alt_lemmas=alt_lemmas,
                 audio_source=record.audio_source,
                 pack_translation=record.pack_translation,
+                related_words_html=assoc_html,
+                related_words_preview=assoc_preview,
                 parent=self,
             )
             if not dlg.exec() or dlg.result_data is None:
@@ -1215,6 +1271,7 @@ class MainWindow(QMainWindow):
                 audio_clip=audio_clip if include_audio_default else None,
                 include_screenshot=self.config.capture_screenshot_on_mine,
                 screenshot_clip=shot_clip if self.config.capture_screenshot_on_mine else None,
+                related_words_html=assoc_html,
             )
 
         def _do_mine() -> dict:
@@ -1242,6 +1299,7 @@ class MainWindow(QMainWindow):
                 source_game=source_name,
                 stage_mode=forged.stage_mode,
                 ai_grammar_notes=grammar_html,
+                related_words_html=forged.related_words_html,
                 audio_bytes=audio_bytes,
                 audio_filename=audio_name,
                 screenshot_bytes=screenshot_bytes,

@@ -18,13 +18,14 @@ from PySide6.QtWidgets import (
 )
 
 from galgame_anki.core.context_meaning import format_contextual_meaning
-from galgame_anki.core.dictionary import DictEntry, LookupMatch
+from galgame_anki.core.dictionary import DictEntry, LookupMatch, extract_concise_senses
 from galgame_anki.core.grammar_engine import (
     ParticleInfo,
     SentenceGrammarAnalysis,
     explain_pos_friendly,
 )
 from galgame_anki.core.tokenizer import Token
+from galgame_anki.core.word_associations import WordAssociationTree
 from galgame_anki.ui.pitch_widget import PitchGraphWidget
 from galgame_anki.ui.theme import get_palette
 
@@ -82,7 +83,50 @@ def _format_entries_html(
             return f'<p style="color:{p.text_muted}; margin:4px 0;">{html.escape(empty_hint)}</p>'
         return "".join(blocks)
 
+    # 1. 重點精簡摘要（跨詞典自動去重，絕不把 4 本詞典的重複意思堆滿畫面）
+    focused = extract_concise_senses(entries, max_senses=5)
+    is_bilingual = any(e.dict_kind == "bilingual" for e in entries)
+    has_zh_focused = is_bilingual and any(any("\u4e00" <= ch <= "\u9fff" for ch in s) for s in focused)
+
+    # 若重點釋義僅 1 條且與頂部語境橫幅完全相同，不重複印第二次
+    show_focused_box = bool(focused) and not (len(focused) == 1 and context_meaning and focused[0] == context_meaning)
+    if show_focused_box:
+        bullet_items = "".join(
+            f'<div style="margin:2px 0; line-height:1.6;">'
+            f'<span style="color:{p.accent_pink}; font-weight:700;">{idx}.</span> {html.escape(s)}</div>'
+            for idx, s in enumerate(focused, start=1)
+        )
+        blocks.append(
+            f'<div style="margin-bottom:8px; padding:8px 10px; background:{p.bg_input}; '
+            f'border:1px solid {p.border}; border-radius:10px;">'
+            f'<div style="font-size:11px; color:{p.accent_pink}; margin-bottom:3px; font-weight:700;">'
+            f'📌 去重重點釋義（已自動過濾重複詞典與例句雜訊）</div>'
+            f'<div style="font-size:14px; color:{p.text_primary};">{bullet_items}</div>'
+            f"</div>"
+        )
+
+    # 2. 補充來源明細：只列出真正有額外資訊的不同詞典，避免與上方重點重複堆砌
+    focused_set = set(focused)
+    if context_meaning:
+        focused_set.add(context_meaning)
+    shown_dicts: set[str] = set()
+    skipped_extra = 0
     for entry in entries[:6]:
+        if entry.dict_name in shown_dicts:
+            skipped_extra += 1
+            continue
+        per_senses = extract_concise_senses([entry], max_senses=3)
+        if not per_senses:
+            skipped_extra += 1
+            continue
+        if has_zh_focused and not any(any("\u4e00" <= ch <= "\u9fff" for ch in s) for s in per_senses):
+            skipped_extra += 1
+            continue
+        # 若該詞典所有精煉義項已完全包含於上方重點框，則摺疊計入去重提示，不重複顯示！
+        if set(per_senses) <= focused_set:
+            skipped_extra += 1
+            continue
+        shown_dicts.add(entry.dict_name)
         dict_tag = html.escape(entry.dict_name)
         friendly_pos = explain_pos_friendly(entry.pos)
         pos_display = friendly_pos or entry.pos
@@ -91,15 +135,21 @@ def _format_entries_html(
             if pos_display
             else ""
         )
-        gloss_lines = "<br>".join(
-            html.escape(g).replace("\n", "<br>") for g in entry.glosses[:5]
-        )
+        gloss_lines = "<br>".join(html.escape(s) for s in per_senses)
         blocks.append(
-            f'<div style="margin-bottom:8px; padding:8px 10px; background:{p.bg_input}; '
-            f'border:1px solid {p.border}; border-radius:10px;">'
-            f'<div style="font-size:11px; color:{p.accent_pink}; margin-bottom:3px; font-weight:600;">{dict_tag}{pos_tag}</div>'
-            f'<div style="font-size:14px; line-height:1.65; color:{p.text_primary};">{gloss_lines}</div>'
+            f'<div style="margin-bottom:6px; padding:7px 10px; background:{p.bg_input}; '
+            f'border:1px solid {p.border}; border-radius:9px;">'
+            f'<div style="font-size:11px; color:{p.text_muted}; margin-bottom:2px; font-weight:600;">{dict_tag}{pos_tag}</div>'
+            f'<div style="font-size:13.5px; line-height:1.55; color:{p.text_primary};">{gloss_lines}</div>'
             f"</div>"
+        )
+        if len(shown_dicts) >= 2:
+            break
+
+    if skipped_extra > 0:
+        blocks.append(
+            f'<div style="font-size:11px; color:{p.text_muted}; margin-top:2px;">'
+            f"✨ 已自動摺疊 {skipped_extra} 條重複或英文備援詞條，只保留核心重點。</div>"
         )
     return "".join(blocks)
 
@@ -117,6 +167,7 @@ class LookupDetailPanel(QFrame):
         self._theme_name = theme_name
         self._current_token: Token | None = None
         self._current_analysis: SentenceGrammarAnalysis | None = None
+        self._current_assoc: WordAssociationTree | None = None
         self._last_args: tuple | None = None
         self._build_ui()
 
@@ -201,6 +252,11 @@ class LookupDetailPanel(QFrame):
         self.grammar_browser.setMinimumHeight(110)
         self.tabs.addTab(self.grammar_browser, "🧭 理解本句與語法")
 
+        self.assoc_browser = QTextBrowser()
+        self.assoc_browser.setOpenExternalLinks(False)
+        self.assoc_browser.setMinimumHeight(110)
+        self.tabs.addTab(self.assoc_browser, "🌳 聯想記憶樹")
+
         layout.addWidget(self.tabs, 1)
         self._apply_palette_styles()
 
@@ -211,6 +267,8 @@ class LookupDetailPanel(QFrame):
             self.show_token(*self._last_args)
         if self._current_analysis is not None:
             self.set_sentence_analysis(self._current_analysis)
+        if self._current_assoc is not None:
+            self.set_word_associations(self._current_assoc)
 
     def _apply_palette_styles(self) -> None:
         p = get_palette(self._theme_name)
@@ -278,6 +336,20 @@ class LookupDetailPanel(QFrame):
         self.grammar_browser.setHtml(
             analysis.to_compact_html(accent_color=p.accent_pink, muted_color=p.text_muted)
         )
+
+    def set_word_associations(self, tree: WordAssociationTree | None) -> None:
+        """更新第四分頁「🌳 聯想記憶樹」（同漢字詞族・常用複合・自他／同音易混詞）。"""
+        self._current_assoc = tree
+        p = get_palette(self._theme_name)
+        if tree is None or tree.is_empty():
+            self.tabs.setTabText(3, "🌳 聯想記憶樹")
+            self.assoc_browser.setHtml(
+                f'<p style="color:{p.text_muted}; margin:6px 0;">點擊上方任意單詞，這裡會自動展開同漢字詞族（以熟帶生）、常用複合詞與自他／同音易混詞。</p>'
+            )
+            return
+        cnt = tree.total_nodes()
+        self.tabs.setTabText(3, f"🌳 聯想記憶樹 ({cnt})" if cnt else "🌳 聯想記憶樹")
+        self.assoc_browser.setHtml(tree.to_panel_html(self._theme_name))
 
     def show_token(
         self,

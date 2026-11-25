@@ -462,7 +462,10 @@ class MpvSubtitleBridge(QObject):
                         self._paused = bool(state.get("paused", False))
                         if ev is not None:
                             self._on_sub_active(ev.sub_start, ev.sub_end)
-                            self.subtitle_received.emit(ev)
+                            try:
+                                self.subtitle_received.emit(ev)
+                            except RuntimeError:
+                                break
                         elif state.pop("sub_just_cleared", False):
                             self._on_sub_cleared()
         finally:
@@ -472,4 +475,7 @@ class MpvSubtitleBridge(QObject):
                 self._active_sock = None
             sock.close()
             self._connected = False
-            self.connection_changed.emit(False, "mpv 未連線")
+            try:
+                self.connection_changed.emit(False, "mpv 未連線")
+            except RuntimeError:
+                pass

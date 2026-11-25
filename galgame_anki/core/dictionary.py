@@ -13,6 +13,7 @@ import json
 import re
 import sqlite3
 import tempfile
+import threading
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -134,16 +135,24 @@ class LookupMatch:
         return extract_concise_senses(target, max_senses=max_senses)
 
     def best_concise_meaning(self, preference: str = "bilingual", strict: bool = False) -> str:
-        """回傳最適合放進 Anki 卡片的 1～2 行精煉核心釋義（strict=True 時絕不把中文塞進日日單語欄；雙語有中文時不混入英文）。"""
+        """回傳最適合放進 Anki 卡片的 1 行重點核心釋義（嚴格去重，絕不把多本詞典重複義項拼接在一起）。"""
         senses = self.concise_senses(preference, max_senses=4, strict=strict)
         if senses:
             if preference == "bilingual":
-                zh_senses = [s for s in senses if _HAS_KANJI_RE.search(s)]
+                zh_senses = [s for s in senses if _is_chinese_gloss(s)]
                 if zh_senses:
                     senses = zh_senses
-            if len(senses[0]) < 10 and len(senses) > 1 and not senses[0].endswith(("。", "！", "？")):
-                return f"{senses[0]}；{senses[1]}"
-            return senses[0]
+            first = senses[0]
+            # 僅當首義項極短（<= 3 字且不含多義分隔）且第二義項完全不重疊、亦偏短時才補充 1 條近義
+            if (
+                len(first) <= 3
+                and not re.search(r"[、，,；;。！？]", first)
+                and len(senses) > 1
+                and len(senses[1]) <= 10
+                and not _senses_semantically_overlap(first, senses[1])
+            ):
+                return f"{first}、{senses[1]}"
+            return first
         if strict:
             return ""
         return self.primary_definition(preference)
@@ -174,9 +183,78 @@ _INFLECTION_STUB_RE = re.compile(
 
 _SKIP_SENSE_LINE_RE = re.compile(
     r"^(?:例：|　例：|see:|cf\.|compare|\d{4}[，,年]|Wiktionary|redirected from|.*redirected from|"
-    r".*alternative kanji|.*alternative spelling|平假名音[节節]|片假名音[节節]|音[节節][ぁ-んァ-ン]|[ぁ-んァ-ンー\s・]+$)",
+    r".*alternative kanji|.*alternative spelling|平假名音[节節]|片假名音[节節]|音[节節][ぁ-んァ-ン]|"
+    r"[ぁ-んァ-ンー\s・]+$|(?:男性|女性)?人名$|姓氏$|地名$|名字$|大阿[尔爾]克那|須弥山|ૐ|和文通話表|"
+    r"〈[^〉]+〉|.*（[★🅁①-⑨]）$|as\s+[\u3040-\u9fff]|"
+    r"(?:非形式的|形式的|口語|文語|俗語|雅語|古語|廃語|方言|卑語|敬語|謙譲語|丁寧語|尊敬語|"
+    r"自五|他五|自他五|自一|他一|自他一|自サ|他サ|自動|他動|自動詞|他動詞|自他動|"
+    r"名詞|動詞|形容詞|形容動詞|副詞|感動詞|接続詞|連体詞|代名詞|接尾辞|接頭辞|"
+    r"形|形動|名|副|感|連|接|代|接尾|接頭)$)",
     re.IGNORECASE,
 )
+
+_CITATION_LINE_RE = re.compile(
+    r"(?:→ISBN|ISBN\b|虛構作品|虚构作品|頁：|ページ：|^\d{4}年\s*\d+月|收錄於|收录于|"
+    r"^[（\(][^）\)]{1,20}『[^』]+』[）\)]$)"
+)
+_INLINE_CIRCLED_SPLIT_RE = re.compile(r"\s*(?=[①-⑨])")
+_ASCII_DOMAIN_TAG_RE = re.compile(r"^[A-Za-z][A-Za-z\s/-]{0,20}$")
+
+_INLINE_FURIGANA_RE = re.compile(r"[\u4e00-\u9fff々]\([ぁ-んァ-ヶー]{1,6}\)")
+_LEADING_POS_NOISE_RE = re.compile(
+    r"^(?:(?:[1-9][\.\、\s]+|[①-⑨]\s*)|(?:(?:名|動|自|他|形|形動|副|サ|五|一|感|連|接)[・?？/\s]+)+)+"
+)
+_S2T_NORM = str.maketrans(
+    "学语词义觉听说见现关开门间时书车东飞机气电话读写买卖进过还这个们实际边点头脸声响乐欢爱恋梦变动运经验结构组织认识记忆决定选择应该帮助给让离别对错难简单复杂强弱轻长远广满静温热凉干湿脏净坏伤惊担忧烦恼愿望兴够准备计划练习试战胜负护救杀醒飞游击碎断烧扫画唱弹照录播传送借换赔赚费贵贱穷约规则律权责任务业职馆院厂场港桥路镇城国陆岛湾雾雷风云阳阴树叶种麦鸟鸡鸭鹅猪猫马龙龟虫兽严厉征应体烫发内众",
+    "學語詞義覺聽說見現關開門間時書車東飛機氣電話讀寫買賣進過還這個們實際邊點頭臉聲響樂歡愛戀夢變動運經驗結構組織認識記憶決定選擇應該幫助給讓離別對錯難簡單複雜強弱輕長遠廣滿靜溫熱涼乾濕髒淨壞傷驚擔憂煩惱願望興夠準備計劃練習試戰勝負護救殺醒飛游擊碎斷燒掃畫唱彈照錄播傳送借換賠賺費貴賤窮約規則律權責任務業職館院廠場港橋路鎮城國陸島灣霧雷風雲陽陰樹葉種麥鳥雞鴨鵝豬貓馬龍龜蟲獸嚴厲徵應體燙發內眾",
+)
+_ATOM_SPLIT_RE = re.compile(r"[、，,；;／/\s。！？!?·・]+")
+_PAREN_STRIP_RE = re.compile(r"[（\(][^）\)]*[）\)]")
+
+
+def _is_chinese_gloss(text: str) -> bool:
+    """判斷釋義是否為真正的中文釋義（排除英文用法如 'as 下から, 下より, etc.' 與純日文短句）。"""
+    if not text:
+        return False
+    hanzi = len(re.findall(r"[\u4e00-\u9fff]", text))
+    if hanzi == 0:
+        return False
+    ascii_letters = len(re.findall(r"[A-Za-z]", text))
+    if ascii_letters >= hanzi * 2 and ascii_letters >= 4:
+        return False
+    kana = len(re.findall(r"[ぁ-んァ-ヶ]", text))
+    if kana > hanzi and kana >= 2:
+        return False
+    return True
+
+
+def _sense_atoms(text: str) -> set[str]:
+    """將一條釋義拆成標準化語意原子集合（簡繁歸一、去括號補充），供跨詞典去重使用。"""
+    no_paren = _PAREN_STRIP_RE.sub("", text).translate(_S2T_NORM).lower()
+    atoms: set[str] = set()
+    for part in _ATOM_SPLIT_RE.split(no_paren):
+        p = part.strip("「」『』\"'.,:-_~〜")
+        if p:
+            atoms.add(p)
+    return atoms
+
+
+def _senses_semantically_overlap(a: str, b: str) -> bool:
+    """判斷兩條釋義是否實質重複或互為子集（例如「外面、外部、戶外」與「外面」）。"""
+    aa = _sense_atoms(a)
+    bb = _sense_atoms(b)
+    if not aa or not bb:
+        return False
+    if bb <= aa or aa <= bb:
+        return True
+    inter = len(aa & bb)
+    if inter == 0:
+        return False
+    return (inter / min(len(aa), len(bb))) >= 0.6
+
+
+def _extract_senses_dedup(entries: list[DictEntry], max_senses: int = 6) -> list[str]:
+    return extract_concise_senses(entries, max_senses=max_senses)
 
 _ETYMOLOGY_HEAD_RE = re.compile(r"^(?:词源|詞源|語源|语源|Etymology\b)")
 _ETYMOLOGY_CONT_RE = re.compile(
@@ -209,61 +287,124 @@ def _clean_gloss_noise(text: str) -> str:
 
     formatted: list[str] = []
     for ln in lines:
-        pretty = _WTY_EX_COUNT_RE.sub("\n　例：", ln)
+        # 保留例句數標記供 extract_concise_senses 精準略過後續 N 組例句＋譯文
+        pretty = _WTY_EX_COUNT_RE.sub(r"\n　例[\1]：", ln)
         formatted.append(pretty)
     return "\n".join(formatted).strip()
 
 
+_EX_COUNT_MARKER_RE = re.compile(r"^[　\s]*例\[(\d+)\]：")
+
+
 def extract_concise_senses(entries: list[DictEntry], max_senses: int = 6) -> list[str]:
-    """從一組詞條中提煉出乾淨、不重複、不含例句雜訊與重定向的獨立核心義項。"""
+    """從多本詞典中提煉出乾淨、不重複、去例句雜訊且聚焦重點的獨立核心義項。"""
     senses: list[str] = []
     seen_norm: set[str] = set()
+    seen_atoms: set[str] = set()
+    is_mono_only = bool(entries) and all(e.dict_kind == "monolingual" for e in entries)
+    head_terms = {e.term for e in entries if e.term}
 
-    for entry in entries[:4]:
+    for entry in entries[:6]:
         for g in entry.glosses[:5]:
             cleaned = _clean_gloss_noise(g)
             if not cleaned:
                 continue
-            skip_translation_after_example = False
+            skip_remaining = 0
             for raw_ln in cleaned.splitlines():
                 ln = raw_ln.strip()
                 if not ln:
                     continue
+                # 跳過 Wiktionary 引用文獻／ISBN 出處行，且不消耗例句跳行額度
+                if _CITATION_LINE_RE.search(ln):
+                    continue
+                em = _EX_COUNT_MARKER_RE.match(ln)
+                if em:
+                    # 雙語 Wiktionary 每組例句為「日文＋中文譯文」2 行；日日詞典僅 1 行日文例句
+                    n_ex = int(em.group(1))
+                    if is_mono_only:
+                        skip_remaining = max(0, min(8, n_ex - 1))
+                    else:
+                        skip_remaining = max(1, min(12, n_ex * 2 - 1))
+                    continue
                 if ln.startswith("例：") or ln.startswith("　例："):
-                    skip_translation_after_example = True
+                    skip_remaining = max(skip_remaining, 0 if is_mono_only else 1)
+                    continue
+                if skip_remaining > 0:
+                    skip_remaining -= 1
                     continue
                 if _SKIP_SENSE_LINE_RE.match(ln):
                     continue
+                if is_mono_only and _ASCII_DOMAIN_TAG_RE.match(ln):
+                    continue
                 if _INFLECTION_STUB_RE.search(ln):
                     continue
-                # 若緊跟在日文例句後出現一整句翻譯（含句號且偏長），略過例句翻譯只保留核心義項
-                if skip_translation_after_example:
-                    if ln.endswith(("。", "？", "！", ".", "?", "!")) and len(ln) >= 6:
-                        continue
-                    # 連續例句本身（含大量日文假名＋標點）也略過
-                    if _HAS_JP_KANA_RE.search(ln) and ln.endswith(("。", "？", "！")):
-                        continue
-                    skip_translation_after_example = False
-
-                # 去掉單純的讀音標頭如「急ぐ【いそぐ】」「自五」
-                if re.match(r"^(?:自五|他五|自他五|自一|他一|自他一|自サ|他サ|形|形動|名|副|感|連|接|代|接尾|接頭)$", ln):
+                # 雙語模式過濾掉 Wiktionary 夾雜的帶振假名日文例句（如「この学(がっ)校(こう)は...」）
+                if not is_mono_only and _INLINE_FURIGANA_RE.search(ln):
+                    skip_remaining = max(skip_remaining, 1)
                     continue
+                # 雙語詞條中排除整句日文例句（含假名且帶日文句末標點），並同步跳過緊接其後的中文譯文
+                if not is_mono_only:
+                    kana_cnt = len(re.findall(r"[ぁ-んァ-ン]", ln))
+                    if kana_cnt >= 3 and ln.endswith(("。", "！", "？", "‼", "!", "?")):
+                        skip_remaining = max(skip_remaining, 1)
+                        continue
+                    # 排除短日文異體／交叉引用（如「分る」「募集する」「言い募る」）
+                    if kana_cnt >= 1 and len(ln) <= 6 and not re.search(r"[，,、。；;]", ln):
+                        continue
+
                 if re.match(r"^[\u3040-\u9fff々ー]+【[ぁ-んァ-ンー]+】$", ln):
                     continue
 
-                # 裁短極長解釋，保持單行精煉
-                compact = ln[:72] + ("…" if len(ln) > 72 else "")
-                norm = re.sub(r"[\s，,、。；;・]+", "", compact.lower())
-                if not norm or norm in seen_norm:
-                    continue
-                seen_norm.add(norm)
-                senses.append(compact)
-                if len(senses) >= max_senses * 2:
+                # 若單行內含多個編號義項（如「①越來越強烈 ②募集、招募」），拆分為獨立候選義項以便個別去重與語境排序
+                sub_parts = (
+                    [p.strip() for p in _INLINE_CIRCLED_SPLIT_RE.split(ln) if p.strip()]
+                    if ("①" in ln and "②" in ln)
+                    else [ln]
+                )
+                for part in sub_parts:
+                    # 清理前綴殘留詞性標記（如「名?自 サ 应招」→「应招」、「1. 热空气。」→「热空气」）
+                    cur = re.sub(
+                        r"^(?:[15]-dan|ichidan|godan|suru|kuru)(?:in)?transitive\s*",
+                        "",
+                        part,
+                        flags=re.IGNORECASE,
+                    ).strip()
+                    if not is_mono_only:
+                        cur = _LEADING_POS_NOISE_RE.sub("", cur).strip()
+                    else:
+                        cur = re.sub(r"^[①-⑨]\s*", "", cur).strip()
+                    cur = cur.strip("。；;")
+                    if not cur or cur in head_terms or _SKIP_SENSE_LINE_RE.match(cur):
+                        continue
+
+                    compact = cur[:72] + ("…" if len(cur) > 72 else "")
+                    norm = re.sub(r"[\s，,、。；;・]+", "", compact.translate(_S2T_NORM).lower())
+                    if not norm or norm in seen_norm:
+                        continue
+
+                    # 語意原子子集／高重疊去重：徹底消除「外面、外部、戶外」之後又出現「外面」的重複現象！
+                    atoms = _sense_atoms(compact)
+                    if atoms:
+                        if atoms <= seen_atoms:
+                            continue
+                        if any(_senses_semantically_overlap(compact, prev) for prev in senses):
+                            continue
+
+                    seen_norm.add(norm)
+                    seen_atoms.update(atoms)
+                    senses.append(compact)
+                    if len(senses) >= max_senses * 3:
+                        break
+                if len(senses) >= max_senses * 3:
                     break
-        if len(senses) >= max_senses * 2:
+        if len(senses) >= max_senses * 3:
             break
-    # 優先讓含中文的義項排在前面（純英文義項僅作補位），避免中英夾雜！
-    senses.sort(key=lambda s: 0 if _HAS_KANJI_RE.search(s) else 1)
+
+    # 雙語模式：只要已有真正中文核心釋義，就直接隱藏多餘英文詞典重複義項，讓 Anki 卡片與膠囊聚焦中文重點！
+    if not is_mono_only:
+        zh_senses = [s for s in senses if _is_chinese_gloss(s)]
+        if zh_senses:
+            return zh_senses[:max_senses]
     return senses[:max_senses]
 
 
@@ -330,6 +471,7 @@ class DictionaryEngine:
     def __init__(self, db_path: Path | None = None, load_starter: bool = True) -> None:
         self.db_path = db_path or (get_data_dir() / "dictionaries.db")
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.RLock()
         self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._init_schema()
@@ -337,7 +479,8 @@ class DictionaryEngine:
             self.ensure_starter_loaded()
 
     def close(self) -> None:
-        self._conn.close()
+        with self._lock:
+            self._conn.close()
 
     def _init_schema(self) -> None:
         cur = self._conn.cursor()
@@ -389,10 +532,11 @@ class DictionaryEngine:
         self._conn.commit()
 
     def list_dictionaries(self) -> list[dict[str, Any]]:
-        rows = self._conn.execute(
-            "SELECT id, name, kind, revision, entry_count, priority, enabled "
-            "FROM dictionaries ORDER BY priority ASC, id ASC"
-        ).fetchall()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, name, kind, revision, entry_count, priority, enabled "
+                "FROM dictionaries ORDER BY priority ASC, id ASC"
+            ).fetchall()
         out = []
         for r in rows:
             d = dict(r)
@@ -401,52 +545,55 @@ class DictionaryEngine:
         return out
 
     def set_dictionary_enabled(self, dict_id: int, enabled: bool) -> None:
-        self._conn.execute(
-            "UPDATE dictionaries SET enabled = ? WHERE id = ?",
-            (1 if enabled else 0, dict_id),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "UPDATE dictionaries SET enabled = ? WHERE id = ?",
+                (1 if enabled else 0, dict_id),
+            )
+            self._conn.commit()
 
     def move_dictionary_priority(self, dict_id: int, direction: int) -> None:
         """上移 (-1) 或下移 (+1) 詞典優先順序。"""
-        dicts = self.list_dictionaries()
-        idx = next((i for i, d in enumerate(dicts) if d["id"] == dict_id), -1)
-        if idx < 0:
-            return
-        target_idx = idx + (-1 if direction < 0 else 1)
-        if not (0 <= target_idx < len(dicts)):
-            return
-        dicts[idx], dicts[target_idx] = dicts[target_idx], dicts[idx]
-        for pos, d in enumerate(dicts):
-            self._conn.execute(
-                "UPDATE dictionaries SET priority = ? WHERE id = ?",
-                ((pos + 1) * 10, d["id"]),
-            )
-        self._conn.commit()
+        with self._lock:
+            dicts = self.list_dictionaries()
+            idx = next((i for i, d in enumerate(dicts) if d["id"] == dict_id), -1)
+            if idx < 0:
+                return
+            target_idx = idx + (-1 if direction < 0 else 1)
+            if not (0 <= target_idx < len(dicts)):
+                return
+            dicts[idx], dicts[target_idx] = dicts[target_idx], dicts[idx]
+            for pos, d in enumerate(dicts):
+                self._conn.execute(
+                    "UPDATE dictionaries SET priority = ? WHERE id = ?",
+                    ((pos + 1) * 10, d["id"]),
+                )
+            self._conn.commit()
 
     def apply_dictionary_preset(self, preset: str) -> None:
         """一鍵套用學習階段詞典啟用組合：zh_focus（只開中文＋音調詞頻）/ mono_focus（日日單語）/ all。"""
-        dicts = self.list_dictionaries()
-        for d in dicts:
-            name_low = d["name"].lower()
-            kind = d["kind"]
-            if preset == "all":
-                enabled = True
-            elif preset == "zh_focus":
-                # 保留中文雙語詞典 + 音調/詞頻 + 內建精選中文；關閉純英文 JMdict / Jitendex 避免雜訊！
-                is_en_only = ("jmdict" in name_low or "jitendex" in name_low)
-                enabled = (kind == "meta") or (kind == "bilingual" and not is_en_only)
-            elif preset == "mono_focus":
-                # Lv.3 登樓撤梯：以日日單語 + 音調/詞頻為主，只留日中當安全網，關掉英文
-                is_en_only = ("jmdict" in name_low or "jitendex" in name_low)
-                enabled = (kind in ("monolingual", "meta")) or (kind == "bilingual" and not is_en_only)
-            else:
-                enabled = True
-            self._conn.execute(
-                "UPDATE dictionaries SET enabled = ? WHERE id = ?",
-                (1 if enabled else 0, d["id"]),
-            )
-        self._conn.commit()
+        with self._lock:
+            dicts = self.list_dictionaries()
+            for d in dicts:
+                name_low = d["name"].lower()
+                kind = d["kind"]
+                if preset == "all":
+                    enabled = True
+                elif preset == "zh_focus":
+                    # 保留中文雙語詞典 + 音調/詞頻 + 內建精選中文；關閉純英文 JMdict / Jitendex 避免雜訊！
+                    is_en_only = ("jmdict" in name_low or "jitendex" in name_low)
+                    enabled = (kind == "meta") or (kind == "bilingual" and not is_en_only)
+                elif preset == "mono_focus":
+                    # Lv.3 登樓撤梯：以日日單語 + 音調/詞頻為主，只留日中當安全網，關掉英文
+                    is_en_only = ("jmdict" in name_low or "jitendex" in name_low)
+                    enabled = (kind in ("monolingual", "meta")) or (kind == "bilingual" and not is_en_only)
+                else:
+                    enabled = True
+                self._conn.execute(
+                    "UPDATE dictionaries SET enabled = ? WHERE id = ?",
+                    (1 if enabled else 0, d["id"]),
+                )
+            self._conn.commit()
 
     def find_installed_for_catalog(self, catalog_id: str) -> dict[str, Any] | None:
         """檢查目錄中的開源詞典是否已經安裝於本機，若已安裝回傳其資訊。"""
@@ -461,11 +608,12 @@ class DictionaryEngine:
         return None
 
     def delete_dictionary(self, dict_id: int) -> None:
-        self._conn.execute("PRAGMA foreign_keys = ON")
-        self._conn.execute("DELETE FROM terms WHERE dict_id = ?", (dict_id,))
-        self._conn.execute("DELETE FROM term_meta WHERE dict_id = ?", (dict_id,))
-        self._conn.execute("DELETE FROM dictionaries WHERE id = ?", (dict_id,))
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute("PRAGMA foreign_keys = ON")
+            self._conn.execute("DELETE FROM terms WHERE dict_id = ?", (dict_id,))
+            self._conn.execute("DELETE FROM term_meta WHERE dict_id = ?", (dict_id,))
+            self._conn.execute("DELETE FROM dictionaries WHERE id = ?", (dict_id,))
+            self._conn.commit()
 
     def ensure_starter_loaded(self) -> None:
         """確保內建口語核心詞庫（優先序 #1）與攻略精選詞庫已載入。"""
@@ -800,31 +948,35 @@ class DictionaryEngine:
         return results
 
     def _query_exact(self, word: str) -> list[DictEntry]:
-        rows = self._conn.execute(
-            """
-            SELECT t.term, t.reading, t.pos, t.score, t.glosses_json,
-                   d.name AS dict_name, d.kind AS dict_kind, d.priority
-            FROM terms t
-            JOIN dictionaries d ON d.id = t.dict_id
-            WHERE d.enabled = 1 AND (t.term = ? OR t.reading = ?)
-            ORDER BY
-                (CASE WHEN t.term = ? THEN 0 ELSE 1 END),
-                (CASE
-                    WHEN t.pos IN ('char', 'non-lemma')
-                         OR LOWER(t.pos) LIKE '%dialect%'
-                         OR t.reading = ''
-                    THEN 1 ELSE 0
-                END),
-                d.priority ASC,
-                t.score DESC
-            LIMIT 36
-            """,
-            (word, word, word),
-        ).fetchall()
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT t.term, t.reading, t.pos, t.score, t.glosses_json,
+                       d.name AS dict_name, d.kind AS dict_kind, d.priority
+                FROM terms t
+                JOIN dictionaries d ON d.id = t.dict_id
+                WHERE d.enabled = 1 AND (t.term = ? OR t.reading = ?)
+                ORDER BY
+                    (CASE WHEN t.term = ? THEN 0 ELSE 1 END),
+                    (CASE
+                        WHEN t.pos IN ('char', 'non-lemma')
+                             OR LOWER(t.pos) LIKE '%dialect%'
+                             OR t.reading = ''
+                        THEN 1 ELSE 0
+                    END),
+                    d.priority ASC,
+                    t.score DESC
+                LIMIT 36
+                """,
+                (word, word, word),
+            ).fetchall()
 
         entries: list[DictEntry] = []
         for r in rows:
-            raw_glosses = json.loads(r["glosses_json"])
+            raw_json = r["glosses_json"]
+            if not raw_json:
+                continue
+            raw_glosses = json.loads(raw_json)
             cleaned_glosses = [c for g in raw_glosses if (c := _clean_gloss_noise(str(g)))]
             if not cleaned_glosses:
                 continue
@@ -850,21 +1002,25 @@ class DictionaryEngine:
         return entries
 
     def _query_meta(self, term: str, reading: str) -> tuple[list[str], int | None]:
-        rows = self._conn.execute(
-            """
-            SELECT m.mode, m.reading, m.data_json
-            FROM term_meta m
-            JOIN dictionaries d ON d.id = m.dict_id
-            WHERE d.enabled = 1 AND m.term = ?
-            """,
-            (term,),
-        ).fetchall()
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT m.mode, m.reading, m.data_json
+                FROM term_meta m
+                JOIN dictionaries d ON d.id = m.dict_id
+                WHERE d.enabled = 1 AND m.term = ?
+                """,
+                (term,),
+            ).fetchall()
         pitches: list[str] = []
         best_freq: int | None = None
         for r in rows:
             if r["reading"] and reading and r["reading"] != reading:
                 continue
-            data = json.loads(r["data_json"])
+            raw_data = r["data_json"]
+            if not raw_data:
+                continue
+            data = json.loads(raw_data)
             if r["mode"] == "pitch":
                 for p in data.get("pitches", []):
                     if p not in pitches:
@@ -885,15 +1041,16 @@ class DictionaryEngine:
         for i in range(0, len(unique), chunk_size):
             chunk = unique[i : i + chunk_size]
             placeholders = ",".join("?" for _ in chunk)
-            rows = self._conn.execute(
-                f"""
-                SELECT m.term, m.data_json
-                FROM term_meta m
-                JOIN dictionaries d ON d.id = m.dict_id
-                WHERE d.enabled = 1 AND m.mode = 'freq' AND m.term IN ({placeholders})
-                """,
-                chunk,
-            ).fetchall()
+            with self._lock:
+                rows = self._conn.execute(
+                    f"""
+                    SELECT m.term, m.data_json
+                    FROM term_meta m
+                    JOIN dictionaries d ON d.id = m.dict_id
+                    WHERE d.enabled = 1 AND m.mode = 'freq' AND m.term IN ({placeholders})
+                    """,
+                    chunk,
+                ).fetchall()
             for r in rows:
                 try:
                     val = json.loads(r["data_json"]).get("frequency")

@@ -44,6 +44,7 @@ class AnkiCardPayload:
     source_game: str = ""
     stage_mode: str = "lv2"
     ai_grammar_notes: str = ""
+    related_words_html: str = ""
     audio_bytes: bytes | None = None
     audio_filename: str = ""
     screenshot_bytes: bytes | None = None
@@ -342,6 +343,7 @@ class AnkiConnectClient:
                 "SentenceAudio": audio_field,
                 "Screenshot": screenshot_field,
                 "AIGrammarNotes": card.ai_grammar_notes,
+                "RelatedWords": card.related_words_html,
                 "SourceGame": card.source_game,
                 "StageMode": card.stage_mode,
             },

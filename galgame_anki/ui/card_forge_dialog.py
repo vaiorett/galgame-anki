@@ -50,10 +50,11 @@ class ForgedCardData:
     audio_clip: tuple[bytes, str] | None
     include_screenshot: bool
     screenshot_clip: tuple[bytes, str] | None
+    related_words_html: str = ""
 
 
 class CardForgeDialog(QDialog):
-    """輕量 1 秒精煉製卡視窗：把「硬搬詞典」升級為「理解意思＋音畫記憶＋原子知識卡」。"""
+    """輕量 1 秒精煉製卡視窗：把「硬搬詞典」升級為「理解意思＋音畫記憶＋聯想樹＋原子知識卡」。"""
 
     def __init__(
         self,
@@ -77,20 +78,32 @@ class CardForgeDialog(QDialog):
         alt_lemmas: list[tuple[str, str, str, str]] | None = None,
         audio_source: str = "",
         pack_translation: str = "",
+        related_words_html: str = "",
+        related_words_preview: str = "",
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("✨ Refold 精煉製卡（先理解意思・再音畫習得）")
-        self.resize(650, 580)
+        self.setWindowTitle("✨ Refold 精煉製卡（聚焦重點・語境相關・聯想記憶）")
+        self.resize(670, 620)
 
         self._raw_sentence = raw_sentence
         self._pitch_accent = pitch_accent
-        self._bi_senses = rank_senses_by_context(list(bi_senses), sentence_translation) if sentence_translation else list(bi_senses)
+        self._pack_translation = pack_translation
+        effective_trans = sentence_translation or pack_translation
+        self._bi_senses = rank_senses_by_context(
+            list(bi_senses),
+            sentence_translation=effective_trans,
+            raw_sentence=raw_sentence,
+            target_surface=target_word,
+        )
+        # 若有語境線索或劇本譯文，優先自動預選語境相關度最高的重點釋義
+        resolved_default_bi = self._bi_senses[0] if (self._bi_senses and effective_trans) else default_bi
         self._mono_senses = list(mono_senses)
         self._alt_lemmas = alt_lemmas or []
         self._audio_clip = audio_clip
         self._audio_source = audio_source
-        self._pack_translation = pack_translation
+        self._related_words_html = related_words_html
+        self._related_words_preview = related_words_preview
         self._screenshot_clip = screenshot_clip
         self._thread_pool = thread_pool
         self._capture_shot_fn = capture_shot_fn
@@ -102,7 +115,7 @@ class CardForgeDialog(QDialog):
             sentence_highlighted=sentence_highlighted,
             target_word=target_word,
             target_reading=target_reading,
-            default_bi=default_bi,
+            default_bi=resolved_default_bi,
             default_mono=default_mono,
             sentence_translation=sentence_translation,
             include_audio_default=include_audio_default,
@@ -223,18 +236,21 @@ class CardForgeDialog(QDialog):
         if self._bi_senses:
             chip_row = QHBoxLayout()
             chip_row.setSpacing(5)
-            for sense in self._bi_senses[:4]:
-                short = sense[:22] + ("…" if len(sense) > 22 else "")
+            for idx, sense in enumerate(self._bi_senses[:4]):
+                prefix = "★ " if idx == 0 else ""
+                short = prefix + sense[:20] + ("…" if len(sense) > 20 else "")
                 btn = QPushButton(short)
-                btn.setToolTip(f"點擊填入：{sense}")
+                btn.setToolTip(
+                    f"語境相關度最高 · 點擊填入：{sense}" if idx == 0 else f"點擊填入：{sense}"
+                )
                 btn.clicked.connect(lambda _c=False, s=sense: self.bi_edit.setPlainText(s))
                 chip_row.addWidget(btn)
             chip_row.addStretch()
             dl.addLayout(chip_row)
 
         self.bi_edit = QTextEdit()
-        self.bi_edit.setMaximumHeight(58)
-        self.bi_edit.setPlaceholderText("只留這句話中真正對應的 1～2 行中文核心意思…")
+        self.bi_edit.setMaximumHeight(54)
+        self.bi_edit.setPlaceholderText("只留這句話中真正對應的 1 行中文核心重點（已自動去除多本詞典重複義項）…")
         self.bi_edit.setPlainText(default_bi)
         dl.addWidget(self.bi_edit)
 
@@ -243,10 +259,21 @@ class CardForgeDialog(QDialog):
         dl.addWidget(mono_lbl)
 
         self.mono_edit = QTextEdit()
-        self.mono_edit.setMaximumHeight(46)
+        self.mono_edit.setMaximumHeight(44)
         self.mono_edit.setPlaceholderText("已啟用日日單語詞典時自動填入（Lv.1–2 可留空，絕不重複塞入中文）…")
         self.mono_edit.setPlainText(default_mono)
         dl.addWidget(self.mono_edit)
+
+        # CETPath 啟發：🌳 聯想記憶樹附帶勾選與 1 行精簡預覽
+        self.include_related_chk = QCheckBox("🌳 附帶聯想記憶樹（同漢字詞族・搭配・自他/同音辨析，收進背面折疊區）")
+        self.include_related_chk.setChecked(bool(self._related_words_html))
+        self.include_related_chk.setEnabled(bool(self._related_words_html))
+        dl.addWidget(self.include_related_chk)
+        if self._related_words_preview:
+            rel_preview_lbl = QLabel(self._related_words_preview)
+            rel_preview_lbl.setObjectName("MutedLabel")
+            rel_preview_lbl.setWordWrap(True)
+            dl.addWidget(rel_preview_lbl)
 
         root.addWidget(def_card)
 
@@ -408,7 +435,12 @@ class CardForgeDialog(QDialog):
             self.trans_edit.setText(text)
             # 取得本句自然譯文後，若原先有多個義項，自動按語境重疊度將最符合這句話的義項排第 1
             if self._bi_senses:
-                reranked = rank_senses_by_context(self._bi_senses, text)
+                reranked = rank_senses_by_context(
+                    self._bi_senses,
+                    sentence_translation=text,
+                    raw_sentence=self._raw_sentence,
+                    target_surface=self.word_edit.text().strip(),
+                )
                 if reranked and reranked[0] != self._bi_senses[0]:
                     self._bi_senses = reranked
                     self.bi_edit.setPlainText(reranked[0])
@@ -432,5 +464,6 @@ class CardForgeDialog(QDialog):
             audio_clip=self._audio_clip if self.include_audio_chk.isChecked() else None,
             include_screenshot=self.include_shot_chk.isChecked(),
             screenshot_clip=self._screenshot_clip if self.include_shot_chk.isChecked() else None,
+            related_words_html=self._related_words_html if self.include_related_chk.isChecked() else "",
         )
         self.accept()

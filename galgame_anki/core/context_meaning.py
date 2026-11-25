@@ -117,26 +117,70 @@ def format_contextual_meaning(
     return f"{phrase}（原形「{lemma}」：{short_base}）"
 
 
-def rank_senses_by_context(senses: list[str], sentence_translation: str) -> list[str]:
-    """當已有整句中文參考理解時，依語境重疊度將最貼合本句的詞典義項自動排到第 1 位！"""
-    if not senses or not sentence_translation.strip():
-        return senses
+_TRANSITIVE_CLUE_RE = re.compile(r"を[^。、！？]{0,12}$")
+_GRADUAL_CLUE_RE = re.compile(r"(?:一方だ|ばかりだ|てくる|てきた|ていく|ていった|ますます|だんだん|次第に)")
+_GREETING_CLUE_RE = re.compile(r"(?:お願い|よろしく|宜しく|はじめまして|初めまして)")
 
-    tr_chars = set(re.findall(r"[\u4e00-\u9fff]", sentence_translation))
-    if not tr_chars:
-        return senses
+_S2T_CTX = str.maketrans(
+    "这来为让给说听见现关开门间时书觉爱恋变强弱剧烈募集招募请指教照顾关照拜托明白懂理解知道",
+    "這來為讓給說聽見現關開門間時書覺愛戀變強弱劇烈募集招募請指教照顧關照拜託明白懂理解知道",
+)
+
+
+def rank_senses_by_context(
+    senses: list[str],
+    sentence_translation: str = "",
+    raw_sentence: str = "",
+    target_surface: str = "",
+) -> list[str]:
+    """結合「整句譯文重疊度 ＋ 日語句法／自他動詞／搭配線索」，將最貼合本句語境的重點釋義排到第 1 位！"""
+    if len(senses) <= 1:
+        return list(senses)
+
+    tr_norm = (sentence_translation or "").translate(_S2T_CTX).strip()
+    tr_chars = set(re.findall(r"[\u4e00-\u9fff]", tr_norm))
+
+    # 分析日語原句中目標詞前後的語境線索（即使完全沒開翻譯也能準確選義項！）
+    has_wo_before = False
+    has_gradual = bool(_GRADUAL_CLUE_RE.search(raw_sentence or ""))
+    has_greeting = bool(_GREETING_CLUE_RE.search(raw_sentence or ""))
+    if raw_sentence and target_surface:
+        pos = raw_sentence.find(target_surface)
+        if pos > 0:
+            before = raw_sentence[max(0, pos - 14) : pos]
+            has_wo_before = bool(_TRANSITIVE_CLUE_RE.search(before))
 
     def _score(idx_sense: tuple[int, str]) -> tuple[int, int]:
         idx, sense = idx_sense
-        s_chars = set(re.findall(r"[\u4e00-\u9fff]", sense))
-        overlap = len(tr_chars & s_chars)
-        # 雙字連續詞命中加倍權重（如「明白」同時出現在譯文與義項中）
-        bigram_hits = 0
-        zh_only = "".join(re.findall(r"[\u4e00-\u9fff]", sense))
-        for i in range(len(zh_only) - 1):
-            if zh_only[i : i + 2] in sentence_translation:
-                bigram_hits += 1
-        return (-(bigram_hits * 4 + overlap), idx)
+        score = 0
+        s_norm = sense.translate(_S2T_CTX)
+
+        # 1. 與整句中文理解的字詞／雙字詞重疊（權重最高）
+        if tr_chars:
+            s_chars = set(re.findall(r"[\u4e00-\u9fff]", s_norm))
+            overlap = len(tr_chars & s_chars)
+            bigram_hits = 0
+            zh_only = "".join(re.findall(r"[\u4e00-\u9fff]", s_norm))
+            for i in range(len(zh_only) - 1):
+                if zh_only[i : i + 2] in tr_norm:
+                    bigram_hits += 1
+            score += bigram_hits * 8 + overlap * 2
+
+        # 2. 日語句法／搭配相關性線索
+        if has_gradual and any(k in s_norm for k in ("強烈", "加劇", "越發", "變得", "越來越", "劇烈", "加深", "增強")):
+            score += 7
+        if has_wo_before and any(k in s_norm for k in ("募集", "招募", "徵集", "使", "讓", "把")):
+            score += 5
+        elif not has_wo_before and raw_sentence and any(k in s_norm for k in ("募集", "招募", "徵集")):
+            score -= 3
+        if has_greeting and any(k in s_norm for k in ("關照", "指教", "拜託", "照顧", "請多")):
+            score += 8
+
+        # 3. 適度偏好精煉簡短的核心義項（避免過長冷門條目搶占首位）
+        if 2 <= len(sense) <= 24:
+            score += 1
+
+        return (-score, idx)
 
     ranked = sorted(enumerate(senses), key=_score)
     return [s for _, s in ranked]

@@ -24,6 +24,7 @@ NOTE_FIELDS: list[str] = [
     "SentenceAudio",
     "Screenshot",
     "AIGrammarNotes",
+    "RelatedWords",
     "SourceGame",
     "StageMode",
 ]
@@ -250,6 +251,26 @@ details.fold-box summary {
   font-size: 14.5px;
 }
 
+.rel-group {
+  margin-bottom: 8px;
+}
+
+.rel-title {
+  font-size: 12.5px;
+  font-weight: 700;
+  opacity: 0.72;
+  margin-bottom: 3px;
+}
+
+.rel-group ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.rel-group li {
+  margin: 2px 0;
+}
+
 /* 三階段精準分層（登樓撤梯） */
 .stage-lv1 .lv23-only { display: none; }
 .stage-lv2 .lv1-only, .stage-lv3 .lv1-only { display: none; }
@@ -383,6 +404,14 @@ BACK_TEMPLATE = r"""
     <div class="grammar-body">{{AIGrammarNotes}}</div>
   </details>
   {{/AIGrammarNotes}}
+
+  <!-- CETPath 啟發：🌳 日語詞彙聯想記憶樹（同漢字詞族・常用複合・自他/同音易混） -->
+  {{#RelatedWords}}
+  <details class="fold-box">
+    <summary>🌳 聯想記憶樹（同漢字詞族・搭配・易混詞）</summary>
+    <div class="grammar-body">{{RelatedWords}}</div>
+  </details>
+  {{/RelatedWords}}
 </div>
 
 <script>
