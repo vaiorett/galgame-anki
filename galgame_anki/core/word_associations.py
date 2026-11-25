@@ -134,11 +134,11 @@ TRANSITIVITY_PAIRS: tuple[tuple[str, str], ...] = (
 _TRANSITIVITY_LOOKUP: dict[str, list[tuple[str, str]]] = defaultdict(list)
 for _vi, _vt in TRANSITIVITY_PAIRS:
     if _vi == "勝つ" and _vt == "負ける":
-        _TRANSITIVITY_LOOKUP[_vi].append((_vt, "反義配對"))
-        _TRANSITIVITY_LOOKUP[_vt].append((_vi, "反義配對"))
+        _TRANSITIVITY_LOOKUP[_vi].append((_vt, "反義"))
+        _TRANSITIVITY_LOOKUP[_vt].append((_vi, "反義"))
     else:
-        _TRANSITIVITY_LOOKUP[_vi].append((_vt, "對應他動詞"))
-        _TRANSITIVITY_LOOKUP[_vt].append((_vi, "對應自動詞"))
+        _TRANSITIVITY_LOOKUP[_vi].append((_vt, "他動"))
+        _TRANSITIVITY_LOOKUP[_vt].append((_vi, "自動"))
 
 
 @dataclass
@@ -209,7 +209,7 @@ class WordAssociationTree:
         return " ｜ ".join(segs)
 
     def to_panel_html(self, theme_name: str = "sakura") -> str:
-        """輸出主視窗「關聯詞」分頁的乾淨結構化 HTML。"""
+        """輸出精簡聚焦的關聯詞 HTML（去雜訊：不堆疊次要詞頻與重複標籤）。"""
         p = get_palette(theme_name)
         if self.is_empty():
             return (
@@ -218,12 +218,6 @@ class WordAssociationTree:
             )
 
         blocks: list[str] = []
-        if self.kanji_roots:
-            roots_str = " · ".join(f"<b>{html.escape(k)}</b>" for k in self.kanji_roots)
-            blocks.append(
-                f'<div style="font-size:12px; color:{p.text_muted}; margin-bottom:6px;">'
-                f"漢字：{roots_str}</div>"
-            )
 
         def _render_branch(title: str, nodes: list[RelatedWordNode]) -> None:
             if not nodes:
@@ -235,22 +229,26 @@ class WordAssociationTree:
                     if n.is_known
                     else ""
                 )
-                rd = f"「{html.escape(n.reading)}」" if n.reading and n.reading != n.term else ""
-                pt = f" [{html.escape(n.pitch)}]" if n.pitch else ""
-                tag_html = (
-                    f' <span style="color:{p.accent_lilac}; font-size:11px;">{html.escape(n.tag)}</span>'
-                    if n.tag
+                rd = (
+                    f' <span style="color:{p.text_muted}; font-size:12px;">{html.escape(n.reading)}</span>'
+                    if n.reading and n.reading != n.term and n.relation != "homophone"
                     else ""
                 )
-                freq_html = (
-                    f' <span style="color:{p.text_muted}; font-size:11px;">#{n.frequency}</span>'
-                    if n.frequency
+                # 音調僅在同音異字辨析時才有區分價值，其餘分類不堆疊 [3/4] 雜訊
+                pt = (
+                    f' <span style="color:{p.accent_lilac}; font-size:11px;">[{html.escape(n.pitch)}]</span>'
+                    if n.relation == "homophone" and n.pitch
+                    else ""
+                )
+                tag_html = (
+                    f' <span style="color:{p.accent_lilac}; font-size:11px;">· {html.escape(n.tag)}</span>'
+                    if n.tag
                     else ""
                 )
                 gloss = f" — {html.escape(n.meaning)}" if n.meaning else ""
                 rows.append(
                     f'<div style="margin:3px 0; line-height:1.55;">'
-                    f"{known_badge}<b>{html.escape(n.term)}</b>{rd}{pt}{tag_html}{freq_html}"
+                    f"{known_badge}<b>{html.escape(n.term)}</b>{rd}{pt}{tag_html}"
                     f'<span style="color:{p.text_primary};">{gloss}</span></div>'
                 )
             blocks.append(
@@ -261,17 +259,25 @@ class WordAssociationTree:
             )
 
         _render_branch("易混辨析", self.confusables)
-        _render_branch("同字詞族", self.kanji_family)
-        _render_branch("複合詞", self.compounds)
+        _render_branch("常用複合", self.compounds)
+        fam_title = (
+            f"同字詞族 · {' / '.join(html.escape(k) for k in self.kanji_roots[:2])}"
+            if self.kanji_roots
+            else "同字詞族"
+        )
+        _render_branch(fam_title, self.kanji_family)
 
         if self.game_recurrences:
             rec_rows = []
             for gr in self.game_recurrences:
                 spk = f"[{html.escape(gr.speaker)}] " if gr.speaker else ""
-                tr = f'<div style="font-size:12px; color:{p.text_muted};">{html.escape(gr.translation)}</div>' if gr.translation else ""
+                tr = (
+                    f'<div style="font-size:12px; color:{p.text_muted};">{html.escape(gr.translation)}</div>'
+                    if gr.translation
+                    else ""
+                )
                 rec_rows.append(
                     f'<div style="margin:4px 0; line-height:1.5;">'
-                    f'<span style="color:{p.accent_lilac}; font-size:11px;">{html.escape(gr.scene_file)}</span> '
                     f"{spk}{html.escape(gr.text)}{tr}</div>"
                 )
             blocks.append(
@@ -295,17 +301,22 @@ class WordAssociationTree:
                 return
             lis: list[str] = []
             for n in nodes[:limit]:
-                rd = f"（{html.escape(n.reading)}）" if n.reading and n.reading != n.term else ""
-                pt = f" [{html.escape(n.pitch)}]" if n.pitch else ""
+                rd = (
+                    f"（{html.escape(n.reading)}）"
+                    if n.reading and n.reading != n.term and n.relation != "homophone"
+                    else ""
+                )
+                pt = f" [{html.escape(n.pitch)}]" if (n.relation == "homophone" and n.pitch) else ""
                 tg = f" · {html.escape(n.tag)}" if n.tag else ""
                 mg = f"：{html.escape(n.meaning)}" if n.meaning else ""
                 kn = "✓ " if n.is_known else ""
                 lis.append(f"<li>{kn}<b>{html.escape(n.term)}</b>{rd}{pt}{tg}{mg}</li>")
             sections.append(f'<div class="rel-group"><div class="rel-title">{title}</div><ul>{"".join(lis)}</ul></div>')
 
-        _sec("易混辨析", self.confusables, 4)
-        _sec("同字詞族", self.kanji_family, 5)
-        _sec("複合詞", self.compounds, 4)
+        _sec("易混辨析", self.confusables, 3)
+        _sec("常用複合", self.compounds, 4)
+        fam_title = f"同字詞族（{'／'.join(html.escape(k) for k in self.kanji_roots[:2])}）" if self.kanji_roots else "同字詞族"
+        _sec(fam_title, self.kanji_family, 4)
         return "".join(sections)
 
 
@@ -394,9 +405,11 @@ class WordAssociationEngine:
         meaning = m.best_concise_meaning("bilingual", strict=True) or m.best_concise_meaning("monolingual", strict=True)
         if not meaning or meaning.strip() == term or meaning.strip() == m.lemma:
             return None
-        if len(meaning) > 26:
-            meaning = meaning[:26] + "…"
-        pitch = "/".join(m.pitches[:2]) if m.pitches else ""
+        # 聚焦單格重點：若有分號先取首句，並控制在精簡長度內
+        meaning = re.split(r"[；;。]", meaning, maxsplit=1)[0].strip(" 、，,")
+        if len(meaning) > 18:
+            meaning = meaning[:17].rstrip(" 、，,") + "…"
+        pitch = m.pitches[0] if (relation == "homophone" and m.pitches) else ""
         freq = m.frequency if m.frequency is not None else freq_hint
         return RelatedWordNode(
             term=m.lemma or term,
@@ -474,7 +487,7 @@ class WordAssociationEngine:
                     )
                 )
                 for ht in h_terms[:6]:
-                    if len(tree.confusables) >= 4:
+                    if len(tree.confusables) >= 3:
                         break
                     if ht in seen_terms:
                         continue
@@ -482,7 +495,7 @@ class WordAssociationEngine:
                         ht,
                         known,
                         relation="homophone",
-                        tag="同音異字",
+                        tag="同音",
                         freq_hint=h_freqs.get(ht),
                     )
                     if node is not None:
@@ -504,17 +517,17 @@ class WordAssociationEngine:
                         comp_cands.append((term, freq))
         comp_cands.sort(key=lambda x: (0 if x[0] in known else 1, x[1], len(x[0])))
         for term, freq in comp_cands[:10]:
-            if len(tree.compounds) >= 5:
+            if len(tree.compounds) >= 4:
                 break
             if term in seen_terms:
                 continue
-            node = self._summarize_term(term, known, relation="compound", tag="常用複合", freq_hint=freq)
+            node = self._summarize_term(term, known, relation="compound", tag="", freq_hint=freq)
             if node is not None:
                 tree.compounds.append(node)
                 seen_terms.add(node.term)
                 seen_terms.add(term)
 
-        # === 3. 同漢字詞族（以熟帶生：Anki 已知熟詞優先，其次高頻 JPDB 詞！） ===
+        # === 3. 同漢字詞族（以熟帶生：Anki 已知熟詞優先，其次高頻詞，精選最核心 4 條） ===
         fam_cands: list[tuple[str, int, str]] = []
         for k in kanji_roots[:2]:
             for term, freq in self._kanji_index.get(k, []):
@@ -531,8 +544,9 @@ class WordAssociationEngine:
             best_fam.items(),
             key=lambda kv: (0 if kv[0] in known else 1, kv[1][0], len(kv[0])),
         )
-        for term, (freq, k) in ordered_fam[:14]:
-            if len(tree.kanji_family) >= 6:
+        multi_root = len(kanji_roots) >= 2
+        for term, (freq, k) in ordered_fam[:12]:
+            if len(tree.kanji_family) >= 4:
                 break
             if term in seen_terms:
                 continue
@@ -540,7 +554,7 @@ class WordAssociationEngine:
                 term,
                 known,
                 relation="kanji_family",
-                tag=f"同字「{k}」",
+                tag=k if multi_root else "",
                 freq_hint=freq,
             )
             if node is not None:

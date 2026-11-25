@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 
 from galgame_anki.core.grammar_engine import OfflineGrammarEngine
 from galgame_anki.core.learning_progress import LearningProgressStore
+from galgame_anki.ui.verb_explorer import VerbExplorer
 from galgame_anki.ui.theme import get_palette
 
 
@@ -59,6 +60,23 @@ class LearningBlueprintDialog(QDialog):
         self._refresh_overview()
         self._refresh_grammar_list()
 
+    def select_pattern(self, pattern_id: str) -> bool:
+        """跳轉並選取指定語法句型（從「句型拆解」卡片點擊進入時使用）。"""
+        if not pattern_id:
+            return False
+        self.tabs.setCurrentIndex(0)
+        self.level_filter.setCurrentIndex(0)
+        self.domain_filter.setCurrentIndex(0)
+        self.search_edit.clear()
+        for row in range(self.grammar_list.count()):
+            item = self.grammar_list.item(row)
+            pat = item.data(Qt.ItemDataRole.UserRole) if item else None
+            if isinstance(pat, dict) and pat.get("id") == pattern_id:
+                self.grammar_list.setCurrentRow(row)
+                self.grammar_list.scrollToItem(item)
+                return True
+        return False
+
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 12, 14, 12)
@@ -68,6 +86,8 @@ class LearningBlueprintDialog(QDialog):
         self.tabs.addTab(self._build_grammar_tab(), "技能樹")
         self.tabs.addTab(self._build_overview_tab(), "學習總覽")
         self.tabs.addTab(self._build_cheatsheet_tab(), "上手與速查")
+        self.verb_explorer = VerbExplorer(self.theme_name)
+        self.tabs.addTab(self.verb_explorer, "看懂動詞變化")
         layout.addWidget(self.tabs, 1)
 
         bottom = QHBoxLayout()

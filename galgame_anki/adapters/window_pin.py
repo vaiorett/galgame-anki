@@ -25,6 +25,111 @@ TOAST_WINDOW_TITLE = "GalAnki 收錄通知"
 KWIN_PLUGIN_NAME = "galanki_overlay_pin"
 KWIN_UNPIN_PLUGIN_NAME = "galanki_overlay_unpin"
 KWIN_MINIMIZE_ANKI_PLUGIN = "galanki_minimize_anki_once"
+KWIN_RULE_SECTION = "galanki-overlay-layer"
+
+
+def ensure_kwin_overlay_layer_rule(
+    enabled: bool = True,
+    kwinrules_path: Path | None = None,
+    reconfigure: bool = True,
+) -> bool:
+    """在 KDE Plasma 6 `~/.config/kwinrulesrc` 冪等寫入或移除 `layer=overlay` 規則，使覆蓋層在 mpv 全螢幕時亦穩居最上層。"""
+    if kwinrules_path is None:
+        if not is_kde_wayland_kwin_available():
+            return False
+        kwinrules_path = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "kwinrulesrc"
+
+    existing_text = kwinrules_path.read_text(encoding="utf-8") if kwinrules_path.exists() else ""
+
+    # 逐段保留原始文字，絕不改動使用者既有的 mpv / obsidian 等其他視窗規則（含 \s 等跳脫）
+    sections: list[tuple[str, list[str]]] = []
+    cur_name: str | None = None
+    cur_lines: list[str] = []
+    preamble: list[str] = []
+    for raw_ln in existing_text.splitlines():
+        s = raw_ln.strip()
+        if s.startswith("[") and s.endswith("]") and len(s) >= 3:
+            if cur_name is not None:
+                sections.append((cur_name, cur_lines))
+            cur_name = s[1:-1]
+            cur_lines = []
+        else:
+            if cur_name is None:
+                preamble.append(raw_ln)
+            else:
+                cur_lines.append(raw_ln)
+    if cur_name is not None:
+        sections.append((cur_name, cur_lines))
+
+    # 移除舊的 GalAnki 規則段
+    sections = [(name, lines) for name, lines in sections if name != KWIN_RULE_SECTION]
+
+    # 更新 [General] Order= 與 count=
+    general_idx = next((i for i, (name, _) in enumerate(sections) if name == "General"), -1)
+    if general_idx >= 0:
+        g_name, g_lines = sections[general_idx]
+        new_g_lines: list[str] = []
+        saw_order = False
+        for ln in g_lines:
+            if ln.startswith("Order="):
+                saw_order = True
+                items = [x for x in ln[len("Order="):].split(",") if x and x != KWIN_RULE_SECTION]
+                if enabled:
+                    items.append(KWIN_RULE_SECTION)
+                new_g_lines.append("Order=" + ",".join(items))
+            else:
+                new_g_lines.append(ln)
+        if not saw_order and enabled:
+            new_g_lines.append(f"Order={KWIN_RULE_SECTION}")
+        sections[general_idx] = (g_name, new_g_lines)
+    elif enabled:
+        sections.append(("General", [f"Order={KWIN_RULE_SECTION}"]))
+
+    if enabled:
+        rule_lines = [
+            "Description=GalAnki 字幕覆蓋層與查詞浮窗置頂於全螢幕之上",
+            "acceptfocus=false",
+            "acceptfocusrule=2",
+            "above=true",
+            "aboverule=2",
+            "layer=overlay",
+            "layerrule=2",
+            "skippager=true",
+            "skippagerrule=2",
+            "skiptaskbar=true",
+            "skiptaskbarrule=2",
+            f"title=^(?:{OVERLAY_WINDOW_TITLE}|{POPUP_WINDOW_TITLE}|{TOAST_WINDOW_TITLE})$",
+            "titlematch=3",
+        ]
+        sections.append((KWIN_RULE_SECTION, rule_lines))
+
+    out_chunks: list[str] = []
+    if preamble and any(ln.strip() for ln in preamble):
+        out_chunks.append("\n".join(preamble).strip())
+    for name, lines in sections:
+        body = "\n".join(ln for ln in lines if ln.strip() != "")
+        out_chunks.append(f"[{name}]\n{body}" if body else f"[{name}]")
+
+    new_text = "\n\n".join(out_chunks) + "\n"
+    changed = new_text != existing_text
+    if changed:
+        kwinrules_path.parent.mkdir(parents=True, exist_ok=True)
+        kwinrules_path.write_text(new_text, encoding="utf-8")
+
+    if reconfigure and changed:
+        qdbus = _find_qdbus()
+        if qdbus:
+            try:
+                subprocess.run(
+                    [qdbus, "org.kde.KWin", "/KWin", "reconfigure"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=3,
+                    check=False,
+                )
+            except (OSError, subprocess.SubprocessError):
+                pass
+    return True
 
 
 def _find_qdbus() -> str | None:
@@ -49,12 +154,12 @@ def build_kwin_pin_script(
     initial_geometry: tuple[int, int, int, int] | None = None,
     toast_title: str = TOAST_WINDOW_TITLE,
 ) -> str:
-    """產生 KWin 6 JS 腳本：控制覆蓋層、查詞浮窗與右下角收錄通知置頂、記憶拖曳位置與懸停彈窗精準對齊。"""
+    """產生 KWin 6 JS 腳本：控制覆蓋層、查詞浮窗與右下角收錄通知置頂、記憶拖曳位置並在字幕改變尺寸時維持螢幕邊界。"""
     ov_js = json.dumps(overlay_title, ensure_ascii=False)
     pop_js = json.dumps(popup_title, ensure_ascii=False)
     toast_js = json.dumps(toast_title, ensure_ascii=False)
     pin_js = "true" if pinned else "false"
-    if initial_geometry is not None and initial_geometry[0] >= 0 and initial_geometry[1] >= 0:
+    if initial_geometry is not None:
         ix, iy, iw, ih = initial_geometry
         init_geom_js = f"{{ x: {int(ix)}, y: {int(iy)}, width: {int(iw)}, height: {int(ih)} }}"
     else:
@@ -66,16 +171,8 @@ const POPUP_TITLE = {pop_js};
 const TOAST_TITLE = {toast_js};
 const PINNED = {pin_js};
 let savedOverlayGeom = {init_geom_js};
-let placingPopup = false;
+let placingOverlay = false;
 let placingToast = false;
-
-function findOverlay() {{
-    const list = workspace.windowList ? workspace.windowList() : [];
-    for (const w of list) {{
-        if (w && w.caption === OVERLAY_TITLE) return w;
-    }}
-    return null;
-}}
 
 function clampRect(w, x, y, width, height) {{
     let area = null;
@@ -85,37 +182,42 @@ function clampRect(w, x, y, width, height) {{
         area = null;
     }}
     if (!area || area.width <= 0 || area.height <= 0) {{
-        return {{ x: Math.max(8, Math.round(x)), y: Math.max(8, Math.round(y)), width, height }};
+        return {{ x: Math.round(x), y: Math.round(y), width, height }};
     }}
     const nx = Math.max(area.x + 6, Math.min(Math.round(x), area.x + area.width - width - 6));
     const ny = Math.max(area.y + 6, Math.min(Math.round(y), area.y + area.height - height - 6));
     return {{ x: nx, y: ny, width, height }};
 }}
 
-function positionPopupAboveOverlay(pop) {{
-    if (!pop || placingPopup) return;
-    const ov = findOverlay();
-    if (!ov) return;
-    const og = ov.frameGeometry;
-    const pg = pop.frameGeometry;
-    if (!og || !pg || pg.width <= 0 || pg.height <= 0) return;
-
-    const cx = (workspace.cursorPos && workspace.cursorPos.x !== undefined)
-        ? workspace.cursorPos.x
-        : (og.x + 24);
-    let targetX = cx - Math.round(pg.width * 0.35);
-    let targetY = og.y - pg.height - 8;
-    if (targetY < 10) {{
-        targetY = og.y + og.height + 8;
+function rememberOverlayPosition(w) {{
+    if (placingOverlay || !w.frameGeometry) return;
+    const g = w.frameGeometry;
+    if (w.move || w.resize || !savedOverlayGeom || (savedOverlayGeom.width === g.width && savedOverlayGeom.height === g.height)) {{
+        savedOverlayGeom = {{ x: g.x, y: g.y, width: g.width, height: g.height }};
+        return;
     }}
-    const rect = clampRect(pop, targetX, targetY, pg.width, pg.height);
-    if (Math.abs(pg.x - rect.x) > 3 || Math.abs(pg.y - rect.y) > 3) {{
-        placingPopup = true;
-        try {{
-            pop.frameGeometry = rect;
-        }} finally {{
-            placingPopup = false;
-        }}
+    let desiredX = g.x;
+    let desiredY = g.y;
+    let area;
+    try {{
+        area = workspace.clientArea(KWin.MaximizeArea, w);
+    }} catch (_e) {{
+        area = null;
+    }}
+    if (area) {{
+        if (Math.abs(area.x + area.width - (savedOverlayGeom.x + savedOverlayGeom.width)) <= 24)
+            desiredX = savedOverlayGeom.x + savedOverlayGeom.width - g.width;
+        if (Math.abs(area.y + area.height - (savedOverlayGeom.y + savedOverlayGeom.height)) <= 24)
+            desiredY = savedOverlayGeom.y + savedOverlayGeom.height - g.height;
+    }}
+    const rect = clampRect(w, desiredX, desiredY, g.width, g.height);
+    savedOverlayGeom = rect;
+    if (g.x === rect.x && g.y === rect.y) return;
+    placingOverlay = true;
+    try {{
+        w.frameGeometry = rect;
+    }} finally {{
+        placingOverlay = false;
     }}
 }}
 
@@ -149,19 +251,22 @@ function applyToWindow(w) {{
         w.onAllDesktops = PINNED;
         w.skipTaskbar = true;
         w.skipPager = true;
-        if (savedOverlayGeom && w.frameGeometry) {{
+        if (!w.move && !w.resize && savedOverlayGeom && w.frameGeometry) {{
             const g = w.frameGeometry;
             const rect = clampRect(w, savedOverlayGeom.x, savedOverlayGeom.y, g.width, g.height);
             if (Math.abs(g.x - rect.x) > 4 || Math.abs(g.y - rect.y) > 4) {{
                 w.frameGeometry = rect;
             }}
         }}
+        if (w.frameGeometry) {{
+            const geometry = w.frameGeometry;
+            savedOverlayGeom = {{ x: geometry.x, y: geometry.y, width: geometry.width, height: geometry.height }};
+        }}
     }} else if (w.caption === POPUP_TITLE) {{
         w.keepAbove = PINNED;
         w.onAllDesktops = PINNED;
         w.skipTaskbar = true;
         w.skipPager = true;
-        positionPopupAboveOverlay(w);
     }} else if (w.caption === TOAST_TITLE) {{
         w.keepAbove = true;
         w.onAllDesktops = true;
@@ -174,20 +279,30 @@ function applyToWindow(w) {{
 function trackWindow(w) {{
     if (!w) return;
     applyToWindow(w);
+    // KWin 持有原生拖動的滑鼠抓取，放開或取消時均由合成器還原。
+    if (w.interactiveMoveResizeStarted && w.interactiveMoveResizeFinished) {{
+        let previousOpacity = null;
+        function beginMove() {{
+            if (w.caption !== OVERLAY_TITLE || !w.move || previousOpacity !== null) return;
+            previousOpacity = w.opacity;
+            w.opacity = 0;
+        }}
+        w.interactiveMoveResizeStarted.connect(beginMove);
+        w.interactiveMoveResizeFinished.connect(() => {{
+            if (previousOpacity !== null) {{
+                w.opacity = previousOpacity;
+                previousOpacity = null;
+            }}
+        }});
+        beginMove();
+    }}
     if (w.captionChanged) {{
         w.captionChanged.connect(() => applyToWindow(w));
     }}
     if (w.frameGeometryChanged) {{
         w.frameGeometryChanged.connect(() => {{
-            if (w.caption === OVERLAY_TITLE && w.frameGeometry && w.frameGeometry.width >= 400) {{
-                savedOverlayGeom = {{
-                    x: w.frameGeometry.x,
-                    y: w.frameGeometry.y,
-                    width: w.frameGeometry.width,
-                    height: w.frameGeometry.height,
-                }};
-            }} else if (w.caption === POPUP_TITLE) {{
-                positionPopupAboveOverlay(w);
+            if (w.caption === OVERLAY_TITLE) {{
+                rememberOverlayPosition(w);
             }} else if (w.caption === TOAST_TITLE) {{
                 positionToastBottomRight(w);
             }}
@@ -234,11 +349,9 @@ class KWinOverlayPinner:
         self._pinned = bool(pinned)
         if not self.is_supported:
             return
-        if not force_reload and self._active:
-            return
         threading.Thread(
             target=self._apply_sync,
-            args=(bool(pinned), initial_geometry),
+            args=(bool(pinned), initial_geometry, force_reload),
             daemon=True,
         ).start()
 
@@ -250,11 +363,15 @@ class KWinOverlayPinner:
         self,
         pinned: bool,
         initial_geometry: tuple[int, int, int, int] | None,
+        force_reload: bool,
     ) -> None:
         qdbus = _find_qdbus()
         if not qdbus:
             return
         with self._lock:
+            if self._active and not force_reload:
+                return
+            ensure_kwin_overlay_layer_rule(enabled=pinned, reconfigure=True)
             self._unload_locked(qdbus, KWIN_PLUGIN_NAME)
             self._unload_locked(qdbus, KWIN_UNPIN_PLUGIN_NAME)
 

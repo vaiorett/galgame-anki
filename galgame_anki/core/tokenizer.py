@@ -12,6 +12,8 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from galgame_anki.core.verb_lesson import FORMS, build_lesson, verb_group
+from galgame_anki.core.context_meaning import is_otherwise_clause
 from galgame_anki.core.dictionary import DictionaryEngine, LookupMatch
 from galgame_anki.core.hook_cleaner import clean_galgame_hook_text
 
@@ -164,6 +166,8 @@ class Token:
     is_known: bool = False
     is_1t_candidate: bool = False
     lookup: LookupMatch | None = None
+    is_te_form: bool = False
+    verb_type: str = ""
 
     @property
     def is_content_word(self) -> bool:
@@ -207,8 +211,8 @@ _AUX_ATTACH_SURFACES: set[str] = {
     "たい", "たかっ", "たく",
     "れる", "れ", "られる", "られ", "せる", "せ", "させる", "させ",
     "う", "よう", "そう",
-    "てる", "てた", "てない", "でる", "でた", "でない",
-    "いる", "いた", "いない", "います", "いません",
+    "てる", "てた", "てない", "てろ", "でる", "でた", "でない", "でろ",
+    "いる", "い", "いた", "いない", "います", "いません",
     "しまう", "しまっ", "しまえ", "ちゃう", "ちゃっ", "じゃう", "じゃっ",
     "おく", "おい", "とく", "とい", "どく", "どい",
     "みる", "み", "すぎる", "すぎ", "過ぎる", "過ぎ",
@@ -264,6 +268,28 @@ class JapaneseTokenizer:
         else:
             tokens = self._tokenize_dict_greedy(sentence)
 
+        if "じゃないと" in sentence:
+            # 不同分詞器可能將此接續詞切成二至四個詞；只合併完整相鄰的範圍。
+            grouped = []
+            i = 0
+            while i < len(tokens):
+                token = tokens[i]
+                if is_otherwise_clause(sentence, token.start):
+                    end = token.start + len("じゃないと")
+                    j = i
+                    while j + 1 < len(tokens) and tokens[j].end < end and tokens[j].end == tokens[j + 1].start:
+                        j += 1
+                    if tokens[j].end == end:
+                        lookup = self.dictionary.lookup_exact_or_deinflect("じゃないと", lemma_hint="じゃないと")
+                        if lookup and lookup.lemma != "じゃないと":
+                            lookup = None
+                        token = Token("じゃないと", "じゃないと", "じゃないと", token.start, end,
+                                      is_function_word=True, has_dict_entry=lookup is not None, lookup=lookup)
+                        i = j
+                grouped.append(token)
+                i += 1
+            tokens = grouped
+
         # 標記已知詞與未知實詞數量
         unknown_by_lemma: dict[str, list[Token]] = {}
         for tok in tokens:
@@ -295,11 +321,57 @@ class JapaneseTokenizer:
     def _tokenize_sudachi(self, sentence: str) -> list[Token]:
         tokens: list[Token] = []
         assert self._sudachi is not None
-        for m in self._sudachi.tokenize(sentence, self._sudachi_mode):
+        nodes = list(self._sudachi.tokenize(sentence, self._sudachi_mode))
+        consumed = 0
+        for i, m in enumerate(nodes):
+            if i < consumed:
+                continue
             surface = m.surface()
             start = m.begin()
             end = m.end()
             pos0 = m.part_of_speech()[0] if m.part_of_speech() else ""
+            if pos0 == "動詞" and i + 1 < len(nodes):
+                base = m.dictionary_form()
+                conjugation = m.part_of_speech()[4]
+                group = verb_group(base, conjugation)
+                forms = {lesson.surface: form for form in FORMS
+                         if (lesson := build_lesson(base, group, form))}
+                # 只跨過完整而相連的詞素，不從「ていた」或「てください」中間截斷詞素。
+                best = None
+                for j in range(i + 1, len(nodes)):
+                    nxt = nodes[j]
+                    if nxt.begin() != nodes[j - 1].end():
+                        break
+                    candidate = sentence[start:nxt.end()]
+                    if not any(word.startswith(candidate) for word in forms):
+                        break
+                    if candidate in forms:
+                        best = (candidate, nxt.end(), j + 1)
+                if best:
+                    surface, end, consumed = best
+                    lookup = self.dictionary.lookup_exact_or_deinflect(surface, lemma_hint=base)
+                    if not lookup or lookup.lemma != base:
+                        lookup = self.dictionary.lookup_exact_or_deinflect(base, lemma_hint=base)
+                    reading = lookup.reading if lookup else _kata_to_hira(m.reading_form())
+                    tokens.append(Token(surface, base, reading, start, end, lookup=lookup,
+                                        has_dict_entry=lookup is not None, verb_type=conjugation,
+                                        is_te_form=forms[surface] == "te"))
+                    continue
+            if (i and tokens and surface in ("て", "で")
+                    and tuple(m.part_of_speech()[:2]) == ("助詞", "接続助詞")
+                    and nodes[i-1].part_of_speech()[0] in ("動詞", "形容詞")
+                    and tokens[-1].end == start):
+                verb = tokens[-1]
+                verb.surface += surface
+                verb.end = end
+                verb.is_te_form = True
+                base = nodes[i-1].dictionary_form()
+                verb.lookup = self.dictionary.lookup_exact_or_deinflect(verb.surface, lemma_hint=base)
+                verb.has_dict_entry = verb.lookup is not None
+                verb.lemma = verb.lookup.lemma if verb.lookup else base
+                if verb.lookup:
+                    verb.reading = verb.lookup.reading
+                continue
             is_punct = bool(_PUNCT_RE.match(surface)) or pos0 in ("補助記号", "空白")
             is_func = (
                 surface in COMMON_FUNCTION_WORDS
@@ -327,6 +399,7 @@ class JapaneseTokenizer:
                     is_punctuation=is_punct,
                     is_function_word=is_func,
                     has_dict_entry=lookup is not None,
+                    verb_type=m.part_of_speech()[4] if pos0 == "動詞" and lemma == m.dictionary_form() else "",
                     lookup=lookup,
                 )
             )
@@ -355,6 +428,7 @@ class JapaneseTokenizer:
                     "surface": surf,
                     "base": base,
                     "reading": rd_hira,
+                    "verb_type": m.infl_type if pos0 == "動詞" else "",
                     "pos0": pos0,
                     "pos1": pos1,
                     "start": start,
@@ -422,6 +496,8 @@ class JapaneseTokenizer:
                 j = i + 1
                 while j < m_len:
                     nxt = pass1[j]
+                    if nxt["start"] != node["end"]:
+                        break
                     nsurf = nxt["surface"]
                     npos0 = nxt["pos0"]
                     npos1 = nxt["pos1"]
@@ -435,19 +511,18 @@ class JapaneseTokenizer:
                         node["end"] = nxt["end"]
                         j += 1
                         continue
-                    # 2) 「て / で」只在後面接著補助動詞（ている/てしまう/ておく/てみる）時一併吸收
-                    if (
-                        npos0 == "助詞"
-                        and npos1 == "接続助詞"
-                        and nsurf in ("て", "で")
-                        and j + 1 < m_len
-                        and pass1[j + 1]["pos0"] == "動詞"
-                        and pass1[j + 1]["pos1"] == "非自立"
-                        and pass1[j + 1]["surface"] in _AUX_ATTACH_SURFACES
-                    ):
-                        node["surface"] += nsurf + pass1[j + 1]["surface"]
-                        node["end"] = pass1[j + 1]["end"]
-                        j += 2
+                    # IPADIC 有時將「読んでろ」的命令詞尾單獨標為名詞「ろ」。
+                    if nsurf == "ろ" and node.get("te_end") == node["end"]:
+                        node["surface"] += nsurf
+                        node["end"] = nxt["end"]
+                        j += 1
+                        break
+                    # 接續助詞與動詞共同構成て形；後續補助動詞由下一輪辨認。
+                    if npos0 == "助詞" and npos1 == "接続助詞" and nsurf in ("て", "で"):
+                        node["surface"] += nsurf
+                        node["end"] = nxt["end"]
+                        node["te_end"] = nxt["end"]
+                        j += 1
                         continue
                     break
                 merged.append(node)
@@ -491,21 +566,22 @@ class JapaneseTokenizer:
                 if surface not in COMMON_FUNCTION_WORDS:
                     is_func = False
 
-            # 若原句是未活用單詞，傳入 Janome 統計讀音（如 足 -> あし, 事 -> こと）
+            # 若原句是未活用單詞，傳入 Janome 統計讀音（如 足 -> あし, 事 -> こと, 君 -> きみ/くん）
+            pos_hint = nd["pos1"] if (pos0 == "名詞" and nd["pos1"] in ("代名詞", "接尾")) else pos0
             pass_rd = rd_hint if (surface == base_hint and rd_hint and not contains_kanji(rd_hint)) else ""
             # 若 Janome 識別「泳げない」的 stem base 是可能形一段「泳げる」，改不鎖死 lemma_hint 讓 deinflector 還原到五段「泳ぐ」
             pass_lemma = "" if (base_hint.endswith("える") or base_hint.endswith("げる") or base_hint.endswith("ける")) and surface != base_hint else base_hint
 
             lookup = self.dictionary.lookup_exact_or_deinflect(
                 surface,
-                pos_hint=pos0,
+                pos_hint=pos_hint,
                 reading_hint=pass_rd,
                 lemma_hint=pass_lemma,
             )
             if lookup is None and base_hint and base_hint != surface:
                 lookup = self.dictionary.lookup_exact_or_deinflect(
                     base_hint,
-                    pos_hint=pos0,
+                    pos_hint=pos_hint,
                     reading_hint=pass_rd,
                 )
 
@@ -526,6 +602,8 @@ class JapaneseTokenizer:
                     is_function_word=is_func,
                     has_dict_entry=lookup is not None,
                     lookup=lookup,
+                    is_te_form=nd.get("te_end") == end,
+                    verb_type=nd.get("verb_type", "") if lemma == base_hint else "",
                 )
             )
         return tokens

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, QThreadPool, Signal
 from PySide6.QtWidgets import (
+    QComboBox,
     QDialog,
     QFileDialog,
     QFrame,
@@ -86,25 +87,38 @@ class DictionaryManagerDialog(QDialog):
         self.dict_list.itemChanged.connect(self._on_item_toggled)
         layout.addWidget(self.dict_list)
 
-        # 快速一鍵階段詞典預設按鈕（解決中英詞典混在一起的痛點！）
+        # 分離「查詢可用性」與「顯示優先序」：保留日日與單一日英備援供語塊查詞，不因切中文而查不到慣用語
         preset_row = QHBoxLayout()
-        preset_lbl = QLabel("快速切換開關：")
+        preset_lbl = QLabel("排序預設：")
         preset_lbl.setObjectName("MutedLabel")
         preset_row.addWidget(preset_lbl)
 
-        zh_btn = QPushButton("🎯 Lv.1–2 中文專注（關英文）")
-        zh_btn.setToolTip("只啟用中文雙語詞典 + 音調 + 詞頻，停用英文 JMdict/Jitendex 避免雜訊")
-        zh_btn.clicked.connect(lambda: self._apply_preset("zh_focus", "已套用「Lv.1–2 中文專注」：僅啟用中文詞典＋音調詞頻！"))
+        zh_btn = QPushButton("繁中優先（保留備援）")
+        zh_btn.setToolTip("繁中主力優先顯示，同時保留日日與單一日英備援以確保慣用語語塊完整可查")
+        zh_btn.clicked.connect(lambda: self._apply_preset("zh_focus", "已套用「繁中優先」：中文優先顯示，並保留日日與單一日英備援！"))
         preset_row.addWidget(zh_btn)
 
-        mono_btn = QPushButton("🗾 Lv.3 日日單語優先")
-        mono_btn.setToolTip("啟用日日單語 + 中文安全網 + 音調詞頻，停用英文詞典")
-        mono_btn.clicked.connect(lambda: self._apply_preset("mono_focus", "已套用「Lv.3 日日單語」組合！"))
+        mono_btn = QPushButton("日日優先（Lv.3）")
+        mono_btn.setToolTip("日日單語優先顯示，並保留繁中與單一日英備援")
+        mono_btn.clicked.connect(lambda: self._apply_preset("mono_focus", "已套用「日日優先」排序組合！"))
         preset_row.addWidget(mono_btn)
 
-        all_btn = QPushButton("☑ 全部啟用")
+        all_btn = QPushButton("全部啟用")
         all_btn.clicked.connect(lambda: self._apply_preset("all", "已啟用全部已安裝詞典。"))
         preset_row.addWidget(all_btn)
+
+        en_lbl = QLabel("日英備援：")
+        en_lbl.setObjectName("MutedLabel")
+        preset_row.addWidget(en_lbl)
+
+        self.en_fallback_combo = QComboBox()
+        self.en_fallback_combo.addItem("JMdict（推薦）", "jmdict")
+        self.en_fallback_combo.addItem("Jitendex", "jitendex")
+        self.en_fallback_combo.addItem("兩套並用", "both")
+        self.en_fallback_combo.addItem("停用日英", "none")
+        self.en_fallback_combo.setToolTip("選擇單一日英備援來源，便於在 JMdict 與 Jitendex 間實測與回退")
+        self.en_fallback_combo.currentIndexChanged.connect(self._on_en_fallback_changed)
+        preset_row.addWidget(self.en_fallback_combo)
         preset_row.addStretch()
         layout.addLayout(preset_row)
 
@@ -163,15 +177,23 @@ class DictionaryManagerDialog(QDialog):
         kind_map = {"bilingual": "雙語", "monolingual": "日日單語", "meta": "音調/詞頻"}
         for rank, d in enumerate(self.dictionary.list_dictionaries(), start=1):
             kind_label = kind_map.get(d["kind"], d["kind"])
+            rev_txt = f" · {d['revision']}" if d.get("revision") else ""
             state_txt = f"已啟用 · #{rank}" if d["enabled"] else "已停用"
             item = QListWidgetItem(
-                f"[{kind_label}] {d['name']}  —  {d['entry_count']:,} 筆（{state_txt}）"
+                f"[{kind_label}] {d['name']}{rev_txt}  —  {d['entry_count']:,} 筆（{state_txt}）"
             )
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(Qt.CheckState.Checked if d["enabled"] else Qt.CheckState.Unchecked)
             item.setData(Qt.ItemDataRole.UserRole, d["id"])
             self.dict_list.addItem(item)
         self.dict_list.blockSignals(False)
+
+        en_mode = self.dictionary.get_en_fallback_source()
+        self.en_fallback_combo.blockSignals(True)
+        en_idx = self.en_fallback_combo.findData(en_mode)
+        if en_idx >= 0:
+            self.en_fallback_combo.setCurrentIndex(en_idx)
+        self.en_fallback_combo.blockSignals(False)
 
         # 同步更新下方每一部開源詞典的「✅ 已安裝」狀態！
         bundle_all_installed = True
@@ -232,6 +254,13 @@ class DictionaryManagerDialog(QDialog):
         self._refresh_list()
         self.dictionary_updated.emit()
         self.status_lbl.setText(f"✓ {msg}")
+
+    def _on_en_fallback_changed(self) -> None:
+        mode = str(self.en_fallback_combo.currentData() or "jmdict")
+        self.dictionary.set_en_fallback_source(mode)
+        self._refresh_list()
+        self.dictionary_updated.emit()
+        self.status_lbl.setText(f"✓ 已切換日英備援來源：{self.en_fallback_combo.currentText()}")
 
     def _set_busy(self, busy: bool) -> None:
         for b in self.dl_btns:

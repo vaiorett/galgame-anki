@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QFormLayout,
     QHBoxLayout,
+    QLabel,
     QLineEdit,
     QPushButton,
     QSpinBox,
@@ -18,6 +19,12 @@ from PySide6.QtWidgets import (
 )
 
 from galgame_anki.config import AppConfig
+from galgame_anki.ui.overlay_window import (
+    OVERLAY_MAX_HEIGHT,
+    OVERLAY_MAX_WIDTH,
+    OVERLAY_MIN_HEIGHT,
+    OVERLAY_MIN_WIDTH,
+)
 
 
 class SettingsDialog(QDialog):
@@ -91,6 +98,28 @@ class SettingsDialog(QDialog):
         self.theme_combo.addItem("🌙 星夜琉璃（二次元護眼深色）", "starlight")
         af.addRow("介面風格主題：", self.theme_combo)
 
+        size_row = QHBoxLayout()
+        size_row.setSpacing(6)
+        self.overlay_width_spin = QSpinBox()
+        self.overlay_width_spin.setRange(OVERLAY_MIN_WIDTH, OVERLAY_MAX_WIDTH)
+        self.overlay_width_spin.setSingleStep(10)
+        self.overlay_width_spin.setSuffix(" px")
+        self.overlay_height_spin = QSpinBox()
+        self.overlay_height_spin.setRange(OVERLAY_MIN_HEIGHT, OVERLAY_MAX_HEIGHT)
+        self.overlay_height_spin.setSingleStep(4)
+        self.overlay_height_spin.setSuffix(" px")
+        size_row.addWidget(QLabel("寬"))
+        size_row.addWidget(self.overlay_width_spin)
+        size_row.addWidget(QLabel("× 高"))
+        size_row.addWidget(self.overlay_height_spin)
+        size_row.addStretch()
+        af.addRow("覆蓋層視窗大小：", size_row)
+
+        self.overlay_align_combo = QComboBox()
+        self.overlay_align_combo.addItem("左對齊", "left")
+        self.overlay_align_combo.addItem("居中對齊", "center")
+        af.addRow("覆蓋層文字對齊：", self.overlay_align_combo)
+
         tabs.addTab(anki_tab, "Anki・語音與外觀")
 
         # --- Tab 2: 文本接收、Hook 與 Wine ---
@@ -155,6 +184,11 @@ class SettingsDialog(QDialog):
         t_idx = self.theme_combo.findData(c.ui_theme)
         if t_idx >= 0:
             self.theme_combo.setCurrentIndex(t_idx)
+        self.overlay_width_spin.setValue(max(OVERLAY_MIN_WIDTH, min(OVERLAY_MAX_WIDTH, int(c.overlay_width or 820))))
+        self.overlay_height_spin.setValue(max(OVERLAY_MIN_HEIGHT, min(OVERLAY_MAX_HEIGHT, int(c.overlay_height or 128))))
+        align_idx = self.overlay_align_combo.findData(c.overlay_text_align)
+        if align_idx >= 0:
+            self.overlay_align_combo.setCurrentIndex(align_idx)
 
         self.ws_enabled_chk.setChecked(c.ws_enabled)
         self.ws_port_spin.setValue(c.ws_port)
@@ -178,6 +212,9 @@ class SettingsDialog(QDialog):
         c.capture_screenshot_on_mine = self.screenshot_chk.isChecked()
         c.quick_forge_before_mine = self.forge_chk.isChecked()
         c.ui_theme = str(self.theme_combo.currentData() or "sakura")
+        c.overlay_width = self.overlay_width_spin.value()
+        c.overlay_height = self.overlay_height_spin.value()
+        c.overlay_text_align = str(self.overlay_align_combo.currentData() or "left")
 
         c.ws_enabled = self.ws_enabled_chk.isChecked()
         c.ws_port = self.ws_port_spin.value()

@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QPoint, Qt, QThreadPool, QTimer
+from PySide6.QtCore import QPoint, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QAction, QGuiApplication, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -53,14 +53,16 @@ from galgame_anki.core.anki_client import (
     AnkiConnectClient,
     launch_anki_background,
 )
-from galgame_anki.core.context_meaning import format_contextual_meaning, rank_senses_by_context
+from galgame_anki.core.context_meaning import context_gloss_is_chinese, explain_lookup_in_sentence, format_contextual_meaning, rank_senses_by_context
 from galgame_anki.core.dictionary import DictionaryEngine
+from galgame_anki.core.verb_lesson import VerbLesson
 from galgame_anki.core.grammar_engine import (
     OfflineGrammarEngine,
     build_web_ai_prompt,
     translate_sentence_free,
 )
 from galgame_anki.core.learning_progress import LearningProgressStore
+from galgame_anki.core.phrase_matcher import build_phrase_token, find_phrase_for_token
 from galgame_anki.core.sentence_bank import SentenceBankItem, SentenceBankScanner
 from galgame_anki.core.sentence_store import SentenceRecord, SentenceStore
 from galgame_anki.core.tokenizer import (
@@ -100,8 +102,11 @@ DEMO_SENTENCES: list[tuple[str, str]] = [
 class MainWindow(QMainWindow):
     """輕量化二次元伴讀控制台（Galgame + mpv 影片字幕・系統語法藍圖・原聲 Anki 製卡）。"""
 
+    preview_failed = Signal(str)
+
     def __init__(self, config: AppConfig | None = None, load_demo: bool = False) -> None:
         super().__init__()
+        self.preview_failed.connect(self._report_preview_failure)
         self.setWindowTitle("GalAnki")
         self.resize(740, 500)
         self.setMinimumSize(600, 400)
@@ -137,6 +142,7 @@ class MainWindow(QMainWindow):
         self.overlay = OverlayWindow(
             theme_name=self.config.ui_theme,
             grammar_engine=self.grammar_engine,
+            dictionary=self.dictionary,
         )
         self.overlay.restore_saved_state(
             x=self.config.overlay_x,
@@ -150,10 +156,15 @@ class MainWindow(QMainWindow):
             backdrop=self.config.overlay_backdrop,
             font_size=self.config.overlay_font_size,
             always_on_top=self.config.overlay_always_on_top,
+            text_align=self.config.overlay_text_align,
         )
         self.overlay.mine_requested.connect(self._mine_record_token)
         self.overlay.copy_prompt_requested.connect(self._copy_web_ai_prompt_for_record)
         self.overlay.translate_requested.connect(self._translate_record_for_overlay)
+        self.overlay.loop_requested.connect(self._loop_from_overlay)
+        self.overlay.replay_requested.connect(lambda: self.mpv_bridge.step_subtitle(0))
+        self.mpv_bridge.navigation_failed.connect(self.overlay.show_toast)
+        self.mpv_bridge.loop_changed.connect(self.overlay.loop_action.setChecked)
         self.overlay.prev_requested.connect(self._step_history_prev)
         self.overlay.next_requested.connect(self._step_history_next)
         self.overlay.merge_prev_requested.connect(self._merge_previous_sentence)
@@ -318,7 +329,7 @@ class MainWindow(QMainWindow):
 
         self.translate_btn = QPushButton("句意")
         self.translate_btn.setObjectName("GhostBtn")
-        self.translate_btn.setToolTip("查看整句參考譯文")
+        self.translate_btn.setToolTip("優先查看字幕附帶譯文。缺少時使用 Google 機器翻譯，結果僅供參考。")
         self.translate_btn.clicked.connect(self._check_current_sentence_translation)
         meta_row.addWidget(self.translate_btn)
 
@@ -362,6 +373,9 @@ class MainWindow(QMainWindow):
         self.lookup_panel.mine_requested.connect(self._on_panel_mine)
         self.lookup_panel.copy_prompt_requested.connect(self._on_panel_copy_prompt)
         self.lookup_panel.audio_preview_requested.connect(self._preview_current_audio)
+        self.lookup_panel.blueprint_requested.connect(self.open_learning_blueprint)
+        self.overlay.popup.lesson_requested.connect(self._open_verb_lesson)
+        self.lookup_panel.lesson_requested.connect(self._open_verb_lesson)
         left_layout.addWidget(self.lookup_panel, 1)
 
         self.splitter.addWidget(left_col)
@@ -645,12 +659,14 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+3"), self, activated=lambda: self._set_stage_mode("lv3"))
 
     def _shortcut_mine(self) -> None:
-        if self._current_record and self._selected_token:
-            self._mine_record_token(self._current_record, self._selected_token)
+        tok = self.lookup_panel._current_token or self._selected_token
+        if self._current_record and tok:
+            self._mine_record_token(self._current_record, tok)
 
     def _shortcut_mine_forge(self) -> None:
-        if self._current_record and self._selected_token:
-            self._mine_record_token(self._current_record, self._selected_token, force_forge=True)
+        tok = self.lookup_panel._current_token or self._selected_token
+        if self._current_record and tok:
+            self._mine_record_token(self._current_record, tok, force_forge=True)
 
     def _connect_signals(self) -> None:
         self.ingestion.dedup_repeated = self.config.dedup_repeated_chars
@@ -791,7 +807,8 @@ class MainWindow(QMainWindow):
             if rec.audio_clip is not None:
                 return rec.audio_clip
             mpv_clip = extract_video_audio_mp3(
-                video_path=rec.video_path,
+                audio_stream_index=rec.audio_stream_index,
+                video_path=rec.external_audio_path or rec.video_path,
                 start_sec=rec.sub_start,
                 end_sec=rec.sub_end,
             )
@@ -803,6 +820,9 @@ class MainWindow(QMainWindow):
         # 2. 已取得純淨原包人聲／mpv 原聲時直接重用
         if rec.audio_clip is not None:
             return rec.audio_clip
+
+        if rec.source == "mpv":
+            return None
 
         # 3. 已索引遊戲本體／解包「台詞 ↔ 純淨聲優人聲」（0% BGM・0% 音效）
         if rec.audio_source == "silent":
@@ -826,6 +846,10 @@ class MainWindow(QMainWindow):
                 return None
         return None
 
+    def _report_preview_failure(self, message: str) -> None:
+        self.overlay.show_toast(message)
+        self.statusBar().showMessage(message, 5000)
+
     def _preview_current_audio(self) -> None:
         if self._current_record is None:
             return
@@ -836,16 +860,20 @@ class MainWindow(QMainWindow):
             return self._extract_audio_for_record(rec)
 
         worker = FunctionWorker(_do)
-        worker.signals.finished.connect(self._on_audio_preview_ready)
+        worker.signals.finished.connect(lambda clip: self._on_audio_preview_ready(clip, rec))
         worker.signals.failed.connect(
-            lambda err: self.statusBar().showMessage(f"語音試聽失敗：{err}", 4000)
+            lambda err: self.preview_failed.emit(f"語音試聽失敗：{err}")
         )
         self._active_workers.append(worker)
         self.thread_pool.start(worker)
 
-    def _on_audio_preview_ready(self, clip: tuple[bytes, str] | None) -> None:
+    def _on_audio_preview_ready(self, clip: tuple[bytes, str] | None, rec: SentenceRecord) -> None:
+        if not clip and rec.source == "mpv":
+            message = "試聽失敗：缺少字幕起訖時間" if None in (rec.sub_start, rec.sub_end) else "試聽失敗：FFmpeg 無法讀取影片或所選音軌"
+            self._report_preview_failure(message)
+            return
         if not clip:
-            if self._current_record is not None and self._current_record.audio_source == "silent":
+            if rec.audio_source == "silent":
                 self.statusBar().showMessage("🔇 劇本確認本句為旁白／無配音角色。", 4500)
             else:
                 self.statusBar().showMessage(
@@ -854,8 +882,8 @@ class MainWindow(QMainWindow):
                 )
             return
         mp3_bytes, name = clip
-        play_mp3_bytes_async(mp3_bytes)
-        src_hint = "純淨原包人聲" if (self._current_record and self._current_record.audio_source == "voice_pack") else "原聲"
+        play_mp3_bytes_async(mp3_bytes, self.preview_failed.emit)
+        src_hint = "純淨原包人聲" if rec.audio_source == "voice_pack" else "原聲"
         self.statusBar().showMessage(f"🔊 正在試聽{src_hint}（{len(mp3_bytes) / 1024:.1f} KB · {name}）", 3500)
 
     # === Anki 同步與製卡 ===
@@ -962,6 +990,7 @@ class MainWindow(QMainWindow):
         self._ingest_sentence(text, source=source, media_title=media_title)
 
     def _on_mpv_state_changed(self, connected: bool, msg: str) -> None:
+        self.overlay.set_mpv_connected(connected)
         self.mpv_replay_btn.setVisible(connected)
         self.mpv_speed_btn.setVisible(connected)
         if connected:
@@ -969,8 +998,13 @@ class MainWindow(QMainWindow):
             self.game_badge.setObjectName("PillOk")
             self.game_badge.style().unpolish(self.game_badge)
             self.game_badge.style().polish(self.game_badge)
-            if self.overlay.isVisible() and self.config.overlay_replace_mode:
+            # mpv 連線時原字幕會自動隱藏，覆蓋層自動切為全透明電影字幕（不遮畫面）
+            self.overlay.set_backdrop("transparent", save=False)
+            if self.overlay.isVisible():
                 self.mpv_bridge.set_native_subtitle_visible(False)
+        else:
+            if self.overlay._backdrop == "transparent" and self.config.overlay_backdrop != "transparent":
+                self.overlay.set_backdrop(self.config.overlay_backdrop, save=False)
         self.statusBar().showMessage(msg, 4500)
 
     def _toggle_mpv_auto_speedup(self, checked: bool) -> None:
@@ -1035,6 +1069,7 @@ class MainWindow(QMainWindow):
             video_path=ev.video_path,
             sub_start=ev.sub_start,
             sub_end=ev.sub_end,
+            mpv_event=ev,
         )
 
     def _ingest_sentence(
@@ -1045,6 +1080,7 @@ class MainWindow(QMainWindow):
         video_path: str = "",
         sub_start: float | None = None,
         sub_end: float | None = None,
+        mpv_event: MpvSubtitleEvent | None = None,
     ) -> None:
         prev_rec = self.store.latest()
         tokenized = self.tokenizer.tokenize(text, self.store.known_words)
@@ -1058,6 +1094,11 @@ class MainWindow(QMainWindow):
             sub_end=sub_end,
             grammar_analysis=analysis,
         )
+        if mpv_event is not None:
+            rec.audio_stream_index = mpv_event.audio_stream_index
+            rec.external_audio_path = mpv_event.external_audio_path
+            if mpv_event.chinese_subtitle:
+                rec.pack_translation = mpv_event.chinese_subtitle
         # 1. 若已索引遊戲純淨人聲包，新台詞到達時即刻背景抽出 0% BGM 聲優原聲並推進劇情游標
         self._prefetch_voice_pack_in_background(rec)
 
@@ -1095,7 +1136,7 @@ class MainWindow(QMainWindow):
         if self._current_record is None:
             return
         rec = self._current_record
-        if not rec.sentence_translation and rec.pack_translation:
+        if rec.pack_translation:
             rec.sentence_translation = rec.pack_translation
         if rec.sentence_translation:
             self.translation_label.setText(f"🌐 語境理解：{rec.sentence_translation}")
@@ -1104,8 +1145,9 @@ class MainWindow(QMainWindow):
 
         self.translate_btn.setEnabled(False)
         self.translate_btn.setText("核對中…")
-        worker = FunctionWorker(translate_sentence_free, rec.raw_text)
-        worker.signals.finished.connect(lambda tr, r=rec: self._on_sentence_trans_ok(r, tr))
+        original = rec.raw_text
+        worker = FunctionWorker(translate_sentence_free, original)
+        worker.signals.finished.connect(lambda tr: self._on_sentence_trans_ok(rec, tr, original))
         worker.signals.failed.connect(self._on_sentence_trans_fail)
         self._active_workers.append(worker)
         self.thread_pool.start(worker)
@@ -1121,6 +1163,7 @@ class MainWindow(QMainWindow):
         self.config.overlay_replace_mode = bool(state.get("replace_mode", True))
         self.config.overlay_backdrop = str(state.get("backdrop", "vn_dark"))
         self.config.overlay_font_size = int(state.get("font_size", self.config.overlay_font_size))
+        self.config.overlay_text_align = str(state.get("text_align", self.config.overlay_text_align))
         self.config.overlay_guide_dismissed = bool(state.get("guide_dismissed", False))
         self.config.save()
 
@@ -1133,15 +1176,19 @@ class MainWindow(QMainWindow):
         if rec.pack_translation:
             self._on_sentence_trans_ok(rec, rec.pack_translation)
             return
-        worker = FunctionWorker(translate_sentence_free, rec.raw_text)
-        worker.signals.finished.connect(lambda tr, r=rec: self._on_sentence_trans_ok(r, tr))
+        original = rec.raw_text
+        worker = FunctionWorker(translate_sentence_free, original)
+        worker.signals.finished.connect(lambda tr: self._on_sentence_trans_ok(rec, tr, original))
         worker.signals.failed.connect(self._on_sentence_trans_fail)
         self._active_workers.append(worker)
         self.thread_pool.start(worker)
 
-    def _on_sentence_trans_ok(self, rec: SentenceRecord, trans: str) -> None:
+    def _on_sentence_trans_ok(self, rec: SentenceRecord, trans: str, original: str | None = None) -> None:
         self.translate_btn.setEnabled(True)
-        self.translate_btn.setText("🌐 核對句意")
+        self.translate_btn.setText("句意")
+        if original is not None and original != rec.raw_text:
+            return
+        trans = rec.pack_translation or trans
         if not trans:
             self.statusBar().showMessage("無法取得參考句意，可改點「📋 問 Gemini/GPT」。", 4000)
             return
@@ -1153,7 +1200,7 @@ class MainWindow(QMainWindow):
 
     def _on_sentence_trans_fail(self, _err: str) -> None:
         self.translate_btn.setEnabled(True)
-        self.translate_btn.setText("🌐 核對句意")
+        self.translate_btn.setText("句意")
         self.statusBar().showMessage("目前無法連線核對翻譯，可看「🧭 理解本句與語法」離線語序骨架或複製給 Gemini/GPT。", 4500)
 
     def _on_hook_dialogue(self, sentence: str, _thread_key: str) -> None:
@@ -1255,15 +1302,39 @@ class MainWindow(QMainWindow):
             if self.overlay.isVisible():
                 self.overlay.show_record(rec)
 
+    def _loop_from_overlay(self, enabled: bool) -> None:
+        if not enabled:
+            self.mpv_bridge.stop_sentence_loop()
+            return
+        rec = self._current_record
+        if (not rec or rec.source != "mpv" or rec.sub_start is None or rec.sub_end is None
+                or not self.mpv_bridge.loop_subtitle(rec.sub_start, rec.sub_end)):
+            self.overlay.loop_action.setChecked(False)
+            self.overlay.show_toast("請先播放一條有起訖時間的字幕。")
+
+    def _overlay_uses_mpv(self) -> bool:
+        return self.mpv_bridge.is_connected and (
+            self._current_record is None or self._current_record.source in ("demo", "mpv"))
+
     def _step_history_prev(self) -> None:
+        if self._overlay_uses_mpv():
+            self.mpv_bridge.step_subtitle(-1)
+            return
         row = self.history_list.currentRow()
         if row + 1 < self.history_list.count():
             self.history_list.setCurrentRow(row + 1)
+        elif self.overlay.isVisible():
+            self.overlay.show_toast("已經是最早一句歷史", 1400)
 
     def _step_history_next(self) -> None:
+        if self._overlay_uses_mpv():
+            self.mpv_bridge.step_subtitle(1)
+            return
         row = self.history_list.currentRow()
         if row > 0:
             self.history_list.setCurrentRow(row - 1)
+        elif self.overlay.isVisible():
+            self.overlay.show_toast("已經是最新一句", 1400)
 
     def _on_main_token_clicked(self, token: Token, _anchor: QPoint) -> None:
         self._selected_token = token
@@ -1271,22 +1342,32 @@ class MainWindow(QMainWindow):
 
     def _show_token_in_panel(self, token: Token) -> None:
         self._selected_token = token
-        already_known = token.lemma in self.store.known_words or token.surface in self.store.known_words
+        record = self._current_record
+        phrase_tok: Token | None = None
+        if record is not None:
+            pm = find_phrase_for_token(record.raw_text, record.tokenized.tokens, token, self.dictionary)
+            if pm is not None:
+                phrase_tok = build_phrase_token(pm)
+        active_tok = phrase_tok if phrase_tok is not None else token
+        already_known = active_tok.lemma in self.store.known_words or active_tok.surface in self.store.known_words
         particle_info = self.grammar_engine.get_particle_info(token.surface)
         self.lookup_panel.show_token(
             token=token,
             dict_preference=self.config.effective_dict_preference(),
             already_known=already_known,
             particle_info=particle_info,
+            sentence=record.raw_text if record else "",
+            translation=(record.pack_translation or record.sentence_translation) if record else "",
+            phrase_token=phrase_tok,
         )
         # 離線即時展開「🌳 聯想記憶樹」（同漢字詞族・常用複合・自他/同音易混・本作品重現）
         req_id = getattr(self, "_assoc_req_id", 0) + 1
         self._assoc_req_id = req_id
         self.lookup_panel.set_word_associations(None)
-        match = token.lookup
-        lemma = match.lemma if match else token.lemma
-        reading = match.reading if match else token.reading
-        if particle_info is not None or not lemma:
+        match = active_tok.lookup
+        lemma = match.lemma if match else active_tok.lemma
+        reading = match.reading if match else active_tok.reading
+        if (particle_info is not None and phrase_tok is None) or not lemma:
             return
         cur_sent = self._current_record.raw_text if self._current_record else ""
         pack_id = self._resolve_voice_pack_id(self._current_record) or ""
@@ -1359,8 +1440,15 @@ class MainWindow(QMainWindow):
         lemma = match.lemma if match else token.lemma
         reading = match.reading if match else token.reading
         pitch = "/".join(match.pitches[:3]) if (match and match.pitches) else ""
-        raw_bi_senses = match.concise_senses("bilingual", max_senses=5, strict=True) if match else []
-        mono_senses = match.concise_senses("monolingual", max_senses=4, strict=True) if match else []
+        by_lang = match.senses_by_language(max_per_lang=5, convert_tw=True) if match else {"zh": [], "ja": [], "en": []}
+        raw_bi_senses = (
+            [s.text for s in by_lang["zh"]]
+            or [s.text for s in by_lang["en"]]
+            or (match.concise_senses("bilingual", max_senses=5, strict=True) if match else [])
+        )
+        mono_senses = [s.text for s in by_lang["ja"]] or (
+            match.concise_senses("monolingual", max_senses=4, strict=True) if match else []
+        )
         effective_trans = record.sentence_translation or record.pack_translation
         bi_senses = rank_senses_by_context(
             raw_bi_senses,
@@ -1369,12 +1457,19 @@ class MainWindow(QMainWindow):
             target_surface=token.surface,
         )
         base_bi = bi_senses[0] if bi_senses else (match.best_concise_meaning("bilingual", strict=True) if match else "")
-        default_bi = (
+        contextual_gloss, _ = explain_lookup_in_sentence(token, record.raw_text, effective_trans)
+        default_bi = contextual_gloss or (
             format_contextual_meaning(token.surface, lemma, base_bi, match.reasons)
             if (match and base_bi)
             else base_bi
         )
-        default_mono = match.best_concise_meaning("monolingual", strict=True) if match else ""
+        # 若無可信繁中義項但有日英／日日備援，清楚標註備援語言供收錄或 Shift 精煉確認
+        if default_bi and not by_lang["zh"] and not context_gloss_is_chinese(default_bi):
+            if by_lang["en"]:
+                default_bi = f"（日英備援）{default_bi}"
+        elif not default_bi and by_lang["ja"]:
+            default_bi = f"（日日備援）{by_lang['ja'][0].text}"
+        default_mono = mono_senses[0] if mono_senses else (match.best_concise_meaning("monolingual", strict=True) if match else "")
 
         if default_bi and default_bi not in bi_senses:
             bi_senses = [default_bi] + bi_senses
@@ -1390,14 +1485,13 @@ class MainWindow(QMainWindow):
         # 若點的是助詞，直接使用白話助詞骨架角色！
         particle = self.grammar_engine.get_particle_info(token.surface)
         if particle is not None:
-            p_short = f"【助詞·{particle.role}】{particle.meaning}"
+            p_short = contextual_gloss if token.surface == "とか" and contextual_gloss else f"【助詞·{particle.role}】{particle.meaning}"
             bi_senses = [p_short] + [s for s in bi_senses if s != p_short]
             default_bi = p_short
             alt_lemmas = []
 
         highlighted_sentence = highlight_target_in_sentence(record.raw_text, token.start, token.end)
         analysis = record.grammar_analysis or self.grammar_engine.analyze(record.tokenized)
-        grammar_html = analysis.to_compact_html(accent_color="#d9468f", muted_color="#7a7a8c")
         source_name = record.media_title or self.config.current_game_name or record.source
 
         # 先取出音訊、畫面快照與聯想記憶樹供精煉確認或直寫
@@ -1479,6 +1573,7 @@ class MainWindow(QMainWindow):
             )
 
         target_final = forged.target_word or lemma
+        grammar_html = analysis.to_compact_html(accent_color="#d9468f", muted_color="#7a7a8c", focus_word=target_final)
         was_known_before = target_final in self.store.known_words
 
         def _do_mine() -> dict:
@@ -1862,7 +1957,7 @@ class MainWindow(QMainWindow):
             self._tray_overlay_act.setChecked(visible)
             self._tray_overlay_act.blockSignals(False)
         if self.mpv_bridge.is_connected:
-            if visible and self.config.overlay_replace_mode:
+            if visible and (self.config.overlay_replace_mode or self.overlay._backdrop == "transparent"):
                 self.mpv_bridge.set_native_subtitle_visible(False)
             elif not visible:
                 self.mpv_bridge.set_native_subtitle_visible(True)
@@ -1871,7 +1966,11 @@ class MainWindow(QMainWindow):
         self.ingestion.paused = paused
         self.statusBar().showMessage("已暫停監聽（無阻沉浸）" if paused else "已恢復自動監聽台詞與字幕", 3500)
 
-    def open_learning_blueprint(self) -> None:
+    def _open_verb_lesson(self, lesson: VerbLesson) -> None:
+        self.overlay.popup.hide()
+        self.open_learning_blueprint(lesson=lesson)
+
+    def open_learning_blueprint(self, pattern_id: str = "", lesson: VerbLesson | None = None) -> None:
         dlg = LearningBlueprintDialog(
             grammar=self.grammar_engine,
             progress_store=self.progress_store,
@@ -1880,6 +1979,11 @@ class MainWindow(QMainWindow):
             theme_name=self.config.ui_theme,
             parent=self,
         )
+        if lesson is not None:
+            dlg.verb_explorer.select_lesson(lesson)
+            dlg.tabs.setCurrentWidget(dlg.verb_explorer)
+        elif isinstance(pattern_id, str) and pattern_id:
+            dlg.select_pattern(pattern_id)
         dlg.mine_grammar_requested.connect(self._mine_grammar_card)
         dlg.exec()
 
@@ -1992,6 +2096,8 @@ class MainWindow(QMainWindow):
 
     def open_settings(self) -> None:
         prev_theme = self.config.ui_theme
+        prev_size = (self.config.overlay_width, self.config.overlay_height)
+        prev_align = self.config.overlay_text_align
         dlg = SettingsDialog(self.config, self.thread_pool, self)
         if dlg.exec():
             self.anki = AnkiConnectClient(self.config.anki_url)
@@ -2008,6 +2114,14 @@ class MainWindow(QMainWindow):
                 self.ingestion.stop_clipboard_watch()
             if self.config.ui_theme != prev_theme:
                 self._apply_theme(self.config.ui_theme, save=False)
+            if (self.config.overlay_width, self.config.overlay_height) != prev_size:
+                self.overlay.set_overlay_size(
+                    self.config.overlay_width,
+                    self.config.overlay_height,
+                    save=False,
+                )
+            if self.config.overlay_text_align != prev_align:
+                self.overlay.set_text_align(self.config.overlay_text_align, save=False)
             self._apply_stage_ui()
             self._update_budget_pill()
             self._background_sync_anki()

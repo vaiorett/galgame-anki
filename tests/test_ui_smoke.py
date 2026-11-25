@@ -100,7 +100,7 @@ class TestUISmoke(unittest.TestCase):
             win._toggle_theme()
             self.assertEqual(win.config.ui_theme, "sakura")
 
-            # 5) 測試原生級「遮蓋替換模式」覆蓋層：固定尺寸絕不跳動、底色與字體切換、閒置隱藏浮動微工具列、無阻膠囊恢復原尺寸
+            # 5) 測試原生級「遮蓋替換模式」覆蓋層：固定尺寸絕不跳動、底色與字體切換、右鍵設定、無阻膠囊恢復原尺寸
             win._toggle_overlay(True)
             self.assertTrue(win.overlay.isVisible())
             self.assertTrue(win.overlay._replace_mode)
@@ -109,7 +109,7 @@ class TestUISmoke(unittest.TestCase):
             self.assertFalse(hasattr(win, "ocr_btn"))
             self.assertFalse(hasattr(win.overlay, "ocr_btn"))
             self.assertAlmostEqual(win.overlay.windowOpacity(), 1.0, places=2)
-            self.assertFalse(win.overlay.toolbar_widget.isVisible())
+            self.assertFalse(win.overlay._options_menu.isVisible())
 
             win.overlay._toggle_always_on_top(False)
             self.assertFalse(win.overlay._always_on_top)
@@ -118,10 +118,10 @@ class TestUISmoke(unittest.TestCase):
             self.assertTrue(win.overlay._always_on_top)
             self.assertTrue(win.config.overlay_always_on_top)
 
-            win.overlay._set_chrome_active(True)
-            self.assertTrue(win.overlay.toolbar_widget.isVisible())
-            win.overlay._set_chrome_active(False)
-            self.assertFalse(win.overlay.toolbar_widget.isVisible())
+            win.overlay.lock_action.trigger()
+            self.assertTrue(win.overlay._locked)
+            win.overlay.lock_action.trigger()
+            self.assertFalse(win.overlay._locked)
 
             # 底色預設切換（深黑 -> 暖白 -> 純黑 -> 深黑）與 A+/A- 字體縮放
             orig_backdrop = win.overlay._backdrop
@@ -132,14 +132,13 @@ class TestUISmoke(unittest.TestCase):
             self.assertEqual(win.overlay._font_size, orig_fs + 2)
             self.assertEqual(win.config.overlay_font_size, orig_fs + 2)
 
-            win.overlay.resize(820, 128)
             win._ingest_sentence("『わ、わかった！　えいっ』", "hook")
-            self.assertEqual((win.overlay.width(), win.overlay.height()), (820, 128))
+            subtitle_size = win.overlay.size()
             win._ingest_sentence(
                 "明日以降、学園で顔を合わせても、まるで今日のことがなかったかのように振舞います。そしてまた新しい朝が来るのだ。",
                 "hook",
             )
-            self.assertEqual((win.overlay.width(), win.overlay.height()), (820, 128))
+            self.assertEqual(win.overlay.size(), subtitle_size)
             win.overlay._toggle_lock(True)
             self.assertTrue(win.overlay._locked)
             self.assertTrue(win.overlay._guide_dismissed)
@@ -148,7 +147,7 @@ class TestUISmoke(unittest.TestCase):
             self.assertTrue(win.overlay._freeflow_mode)
             win.overlay.toggle_freeflow_mode()
             self.assertFalse(win.overlay._freeflow_mode)
-            self.assertEqual((win.overlay.width(), win.overlay.height()), (820, 128))
+            self.assertEqual(win.overlay.size(), subtitle_size)
 
             # 6) 測試系統學習藍圖與 mpv 字幕對話框（確認偵測到本機 Flatpak mpv）
             bp_dlg = LearningBlueprintDialog(

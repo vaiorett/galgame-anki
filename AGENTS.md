@@ -18,7 +18,7 @@
 5. **單筆電螢幕極簡隱形伴讀（硬性 UX 偏好）**：
    - 啟動時預設**主視窗收進系統匣、只顯示字幕覆蓋層**，同時**自動在背景啟動 Anki 並透過 KWin 一次性最小化**；螢幕 100% 留給遊戲／mpv。
    - 收錄預設**一鍵直寫 Anki**（零彈窗、右下角 `FloatingUndoToast` 提供 6 秒 `↩ 撤銷`），**按住 `Shift` 點擊才開啟精煉編輯窗**。
-   - 覆蓋層懸停工具列維持極簡（僅 6 個核心圖示＋`⚙` 設定選單），主視窗保持精簡 5 區頂欄，**不要再把 `📷 OCR` 按鈕或大排雜訊按鈕塞回主介面**。
+   - 覆蓋層的右下角平時只畫一點圓弧，滑入後可點齒輪開啟播放與設定選單，也可按右鍵，主視窗保持精簡 5 區頂欄，**不要再把 `📷 OCR` 按鈕或大排雜訊按鈕塞回主介面**。
 
 ---
 
@@ -57,7 +57,7 @@ galgame_anki/
 │   ├── hook_engine.py       # TextractorCLI 自動下載／32-64bit 注入／線程評分與去重
 │   ├── xp3_psb.py           # 純 Python Kirikiri XP3（含 CxEncryption）+ M2 PSB (.scn) 解析與 Formats.dat 本機快取
 │   ├── mpv_bridge.py        # Flatpak io.mpv.Mpv 與原生 mpv 自動偵測、IPC 監聽與原生字幕隱藏
-│   ├── window_pin.py        # KDE Plasma 6 Wayland KWin DBus 原生 keepAbove 置頂與懸停浮窗定位
+│   ├── window_pin.py        # KDE Plasma 6 Wayland KWin DBus 原生 keepAbove 置頂與字幕視窗邊界定位
 │   ├── media_utils.py       # ffplay/paplay 試聽 ＋ mpv FFmpeg 無損切音抽幀（無系統錄音）
 │   ├── linux_wayland.py     # Wine 日區啟動、Spectacle 靜默 WebP 截圖、Wayland 環境診斷
 │   ├── ocr_engine.py        # 框選 OCR 辨識
@@ -65,7 +65,7 @@ galgame_anki/
 │   └── windows.py / base.py # 跨平台抽象層
 ├── ui/
 │   ├── main_window.py       # 單螢幕精簡控制台 ＋ QSystemTrayIcon 系統匣伴讀核心
-│   ├── overlay_window.py    # 置頂遮蓋替換覆蓋層（極簡 6 圖示微工具列＋⚙ 選單、固定尺寸、無阻膠囊）
+│   ├── overlay_window.py    # 置頂遮蓋替換覆蓋層（右鍵播放與設定選單、固定字幕區、無阻膠囊）
 │   ├── toast_widget.py      # 右下角置頂浮動通知條（一鍵直寫 → 6 秒 ↩ 撤銷，永不搶遊戲焦點）
 │   ├── sentence_widget.py   # FlowLayout 互動分詞台詞（支援懸停查詞與零殘影清空）
 │   ├── lookup_popup.py      # 主視窗詳情卡 & 覆蓋層 Yomitan 懸停浮窗（含多候選原形切換）
@@ -95,7 +95,7 @@ galgame_anki/
 1. **KDE Wayland 置頂**：Qt 的 `WindowStaysOnTopHint` 在 Wayland 無效；不要改強切 `QT_QPA_PLATFORM=xcb`（會讓 1.5x HiDPI 模糊）。請保持 [`adapters/window_pin.py`](galgame_anki/adapters/window_pin.py) 透過 KWin 6 DBus Scripting 控制 `w.keepAbove`（於 `MainWindow.closeEvent` 自動卸載）。
 2. **`わかった` 誤判為 `分かつ`**：透過 `janome` + `core_spoken_dict.json` + [`dictionary.py`](galgame_anki/core/dictionary.py) 多候選詞頻／讀音／POS 消歧義解決；修改分詞或詞典後務必跑回歸測試 `test_frequency_disambiguation_wakatta_and_contextual_meaning`。
 3. **覆蓋層換句殘影**：[`InteractiveSentenceWidget.clear_tokens()`](galgame_anki/ui/sentence_widget.py) 必須先 `w.hide(); w.setParent(None)` 再 `w.deleteLater()`，否則快速換句會出現前後句重疊。
-4. **覆蓋層禁止自動縮放**：`OverlayWindow.show_record()` 嚴禁呼叫 `self.adjustSize()`；切換無阻膠囊回復時須先還原 `resize(target_w, target_h)` 再將 `_freeflow_mode = False`。
+4. **覆蓋層使用儲存的尺寸**：字幕在框內換行，超出時用滾輪閱讀，隱藏捲軸。右下角平時只顯示圓弧，滑入時顯示設定齒輪。保持無阻膠囊的尺寸獨立。Wayland 查詞以覆蓋層為相對錨點，垂直只准翻到字幕另一側，避免把浮窗滑進字幕。
 5. **Flatpak `io.mpv.Mpv` 隱藏原字幕**：實測 mpv v0.41.0 在 `--sub-visibility=no` 下仍可正常透過 `/tmp/galanki-mpv.sock` 推送 `sub-text` 事件。
 6. **遊戲解包純淨人聲（已移除系統錄音／零著作權金鑰隨碼入庫）**：[`xp3_psb.py`](galgame_anki/adapters/xp3_psb.py) 不在倉庫內儲存任何遊戲解密 `ControlBlock` 或 `Formats.dat`；使用時由使用者動態下載公開社群資料庫快取至 `~/.local/share/galgame-anki/garbro/Formats.dat`，僅從 `.xp3` 索引偏移並對當前台詞單檔解包轉 MP3；命中旁白（無語音）時標記 `audio_source="silent"`，不產生多餘錄音檔案。
 

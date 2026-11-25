@@ -33,6 +33,8 @@ class SentenceRecord:
     pack_translation: str = ""       # 來自解包劇本內建的官方譯文（按需核對用，平時不顯示防劇透）
     audio_clip: tuple[bytes, str] | None = None      # (mp3_bytes, filename)
     audio_source: str = ""           # voice_pack | mpv | recorder | manual | silent
+    external_audio_path: str = ""
+    audio_stream_index: int | None = None
     screenshot_clip: tuple[bytes, str] | None = None  # (webp_bytes, filename)
 
 
@@ -57,7 +59,9 @@ class SentenceStore:
     ) -> SentenceRecord:
         now = time.time()
         # 避免與最新一句完全重複時刷屏
-        if self._records and self._records[0].raw_text == tokenized.raw:
+        if (self._records and self._records[0].raw_text == tokenized.raw
+                and self._records[0].source == source
+                and (source != "mpv" or (self._records[0].video_path, self._records[0].sub_start) == (video_path, sub_start))):
             return self._records[0]
 
         # 標記上一句的結束時間，讓語音切片能精準在下一句開口前截斷
@@ -93,6 +97,9 @@ class SentenceStore:
         if not self._records:
             return self.add(tokenized, source="hook", grammar_analysis=grammar_analysis)
         latest = self._records[0]
+        if latest.raw_text != tokenized.raw:
+            latest.sentence_translation = ""
+            latest.pack_translation = ""
         latest.raw_text = tokenized.raw
         latest.tokenized = tokenized
         latest.grammar_analysis = grammar_analysis

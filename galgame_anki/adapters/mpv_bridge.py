@@ -35,6 +35,42 @@ class MpvSubtitleEvent:
     video_path: str = ""
     sub_start: float | None = None
     sub_end: float | None = None
+    audio_stream_index: int | None = None
+    external_audio_path: str = ""
+    chinese_subtitle: str = ""
+
+
+# 同一個 mpv 指令讀取整組屬性，避免 sub-text 比 sub-start/sub-end 先抵達。
+_SNAPSHOT_PROPERTIES = ("sub-start", "sub-end", "path", "working-directory", "media-title",
+                        "current-tracks/audio/ff-index", "current-tracks/audio/external-filename",
+                        "current-tracks/sub2/lang", "secondary-sub-start", "secondary-sub-end",
+                        "secondary-sub-text", "sub-text")
+_SNAPSHOT_FORMAT = "\x1f".join("${=" + name + ":}" for name in _SNAPSHOT_PROPERTIES)
+
+
+def _subtitle_snapshot(value: str) -> MpvSubtitleEvent | None:
+    fields = value.split("\x1f", len(_SNAPSHOT_PROPERTIES) - 1)
+    if len(fields) != len(_SNAPSHOT_PROPERTIES):
+        return None
+    start, end, path, cwd, title, index, external, lang, sub2_start, sub2_end, translation, text = fields
+    if not text.strip():
+        return None
+    if path and cwd and "://" not in path:
+        path = str(Path(cwd) / path)
+    def seconds(raw: str) -> float | None:
+        try:
+            return float(raw)
+        except ValueError:
+            return None
+    event = MpvSubtitleEvent(text.strip(), title, path, seconds(start), seconds(end))
+    event.audio_stream_index = int(index) if index.isdigit() else None
+    event.external_audio_path = str(Path(cwd) / external) if external else ""
+    if lang.lower().split("-")[0] in {"zh", "chi", "zho", "cmn"}:
+        other_start, other_end = seconds(sub2_start), seconds(sub2_end)
+        if None not in (event.sub_start, event.sub_end, other_start, other_end):
+            if abs(other_start - event.sub_start) <= 0.35 and abs(other_end - event.sub_end) <= 0.35:
+                event.chinese_subtitle = translation.strip()
+    return event
 
 
 def _is_flatpak_mpv_installed() -> bool:
@@ -241,6 +277,8 @@ def parse_mpv_ipc_message(
 class MpvSubtitleBridge(QObject):
     """背景自動探索並監聽原生／Flatpak mpv IPC Socket 的跨執行緒字幕與沉浸控制橋接器。"""
 
+    navigation_failed = Signal(str)
+    loop_changed = Signal(bool)
     subtitle_received = Signal(object)     # MpvSubtitleEvent
     connection_changed = Signal(bool, str) # (connected, status_msg)
 
@@ -267,14 +305,15 @@ class MpvSubtitleBridge(QObject):
         self._last_sub_start: float | None = None
         self._last_sub_end: float | None = None
         self._paused: bool = False
+        self._sentence_loop = False
 
     @property
     def is_connected(self) -> bool:
         return self._connected
 
-    def send_ipc_command(self, command: list[Any]) -> bool:
+    def send_ipc_command(self, command: list[Any], request_id: int = 0) -> bool:
         """透過 JSON IPC 向執行中的 mpv 傳送控制指令。"""
-        raw = (json.dumps({"command": command}) + "\n").encode("utf-8")
+        raw = (json.dumps({"command": command, "request_id": request_id}) + "\n").encode("utf-8")
         with self._sock_lock:
             sock = self._active_sock
             if sock is None:
@@ -298,6 +337,34 @@ class MpvSubtitleBridge(QObject):
 
     def toggle_pause(self) -> bool:
         return self.send_ipc_command(["cycle", "pause"])
+
+    def step_subtitle(self, offset: int) -> bool:
+        self.stop_sentence_loop()
+        self._cancel_speed_timer()
+        if self._sped_up:
+            self.set_speed(self._normal_speed)
+            self._sped_up = False
+        return self.send_ipc_command(["sub-seek", offset], request_id=91)
+
+    def stop_sentence_loop(self) -> None:
+        if self._sentence_loop:
+            self.send_ipc_command(["set_property", "ab-loop-b", "no"])
+            self.send_ipc_command(["set_property", "ab-loop-a", "no"])
+            self._sentence_loop = False
+            self.loop_changed.emit(False)
+
+    def loop_subtitle(self, start: float, end: float) -> bool:
+        if start < 0 or end <= start or not self._connected:
+            return False
+        self._cancel_speed_timer()
+        self._sentence_loop = True
+        if (self.send_ipc_command(["set_property", "ab-loop-a", start])
+                and self.send_ipc_command(["set_property", "ab-loop-b", end])
+                and self.replay_current_subtitle(start)):
+            self.loop_changed.emit(True)
+            return True
+        self.stop_sentence_loop()
+        return False
 
     def seek_to(self, sec: float) -> bool:
         return self.send_ipc_command(["seek", max(0.0, float(sec)), "absolute", "exact"])
@@ -349,6 +416,8 @@ class MpvSubtitleBridge(QObject):
             self._sped_up = False
 
     def _on_sub_cleared(self) -> None:
+        if self._sentence_loop:
+            return
         if self._auto_pause_sub_end and not self._paused:
             self._cancel_speed_timer()
             self.set_pause(True)
@@ -376,6 +445,7 @@ class MpvSubtitleBridge(QObject):
         self._thread.start()
 
     def stop(self) -> None:
+        self.stop_sentence_loop()
         self._cancel_speed_timer()
         if self._sped_up and self._connected:
             self.set_speed(self._normal_speed)
@@ -437,6 +507,8 @@ class MpvSubtitleBridge(QObject):
             return
 
         state: dict[str, object] = {}
+        pending_text = ""
+        snapshot_id = 100
         buf = b""
         try:
             while not self._stop_event.is_set():
@@ -458,7 +530,38 @@ class MpvSubtitleBridge(QObject):
                     except json.JSONDecodeError:
                         continue
                     if isinstance(msg, dict):
-                        ev = parse_mpv_ipc_message(msg, state)
+                        if msg.get("request_id") == 91:
+                            if msg.get("error") == "success":
+                                self.set_pause(False)
+                            else:
+                                self.navigation_failed.emit("mpv 在這個位置找不到可跳轉的字幕。")
+                            continue
+                        if msg.get("event") in ("start-file", "end-file"):
+                            self.stop_sentence_loop()
+                            self._last_sub_start = self._last_sub_end = None
+                            pending_text = ""
+                        if msg.get("event") == "property-change" and msg.get("name") == "sub-text":
+                            pending_text = str(msg.get("data") or "").strip()
+                            if pending_text:
+                                snapshot_id += 1
+                                request = {"command": ["expand-text", _SNAPSHOT_FORMAT], "request_id": snapshot_id}
+                                try:
+                                    with self._sock_lock:
+                                        sock.sendall((json.dumps(request) + "\n").encode())
+                                except OSError:
+                                    return
+                                state["sub_active"] = True
+                                continue
+                        if msg.get("request_id") == snapshot_id and pending_text:
+                            ev = _subtitle_snapshot(str(msg.get("data") or ""))
+                            if ev is None:
+                                ev = MpvSubtitleEvent(pending_text, str(state.get("media_title") or ""),
+                                                      str(state.get("video_path") or ""))
+                            if ev.text != pending_text:
+                                continue
+                            pending_text = ""
+                        else:
+                            ev = parse_mpv_ipc_message(msg, state)
                         self._paused = bool(state.get("paused", False))
                         if ev is not None:
                             self._on_sub_active(ev.sub_start, ev.sub_end)
@@ -471,6 +574,8 @@ class MpvSubtitleBridge(QObject):
         finally:
             self._cancel_speed_timer()
             self._sped_up = False
+            self._sentence_loop = False
+            self.loop_changed.emit(False)
             with self._sock_lock:
                 self._active_sock = None
             sock.close()

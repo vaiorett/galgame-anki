@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 AUDIO_SAMPLE_RATE = 24000
@@ -17,6 +18,7 @@ def extract_video_audio_mp3(
     start_sec: float,
     end_sec: float,
     pad_sec: float = 0.25,
+    audio_stream_index: int | None = None,
 ) -> tuple[bytes, str] | None:
     """針對 mpv 播放的本地影片，直接以 FFmpeg 精準擷取該句字幕時間軸的原聲 MP3。"""
     ffmpeg = shutil.which("ffmpeg")
@@ -36,6 +38,7 @@ def extract_video_audio_mp3(
             f"{dur:.3f}",
             "-i",
             video_path,
+            *(["-map", f"0:{audio_stream_index}"] if audio_stream_index is not None else []),
             "-vn",
             "-ac",
             "1",
@@ -100,7 +103,7 @@ def extract_video_frame_webp(
     return res.stdout, fname
 
 
-def play_mp3_bytes_async(mp3_bytes: bytes) -> None:
+def play_mp3_bytes_async(mp3_bytes: bytes, on_error: Callable[[str], None] | None = None) -> None:
     """非同步試聽語音 MP3（使用 ffplay 或 paplay）。"""
     if not mp3_bytes:
         return
@@ -111,13 +114,14 @@ def play_mp3_bytes_async(mp3_bytes: bytes) -> None:
             path.write_bytes(mp3_bytes)
             ffplay = shutil.which("ffplay")
             if ffplay:
-                subprocess.run(
+                played = subprocess.run(
                     [ffplay, "-nodisp", "-autoexit", "-loglevel", "quiet", str(path)],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     check=False,
                 )
-                return
+                if played.returncode == 0:
+                    return
             paplay = shutil.which("paplay")
             ffmpeg = shutil.which("ffmpeg")
             if paplay and ffmpeg:
@@ -127,6 +131,9 @@ def play_mp3_bytes_async(mp3_bytes: bytes) -> None:
                     check=False,
                 )
                 if wav_path.exists():
-                    subprocess.run([paplay, str(wav_path)], check=False)
+                    if subprocess.run([paplay, str(wav_path)], check=False).returncode == 0:
+                        return
+            if on_error:
+                on_error("試聽失敗：請確認系統音訊輸出及 ffplay 或 paplay 是否可用")
 
     threading.Thread(target=_play, daemon=True).start()

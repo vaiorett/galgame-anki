@@ -92,6 +92,7 @@ class AppConfig:
     overlay_always_on_top: bool = True     # 預設真實置頂（於 KDE Wayland 透過 KWin 原生 keepAbove 確保永不掉到遊戲／mpv 後方）
     overlay_replace_mode: bool = True      # 預設開啟「遮蓋替換模式」：不透明蓋住遊戲原對話文字，不看 2 份字幕！
     overlay_backdrop: str = "vn_dark"      # vn_dark (深黑對話框) | vn_paper (暖白對話框) | cinema_black (純黑字幕條)
+    overlay_text_align: str = "left"       # left (左對齊) | center (居中對齊)
     overlay_guide_dismissed: bool = False
     first_run_completed: bool = False
 

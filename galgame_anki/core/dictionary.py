@@ -14,8 +14,10 @@ import re
 import sqlite3
 import tempfile
 import threading
+import uuid
 import zipfile
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable
 
@@ -91,6 +93,21 @@ FREE_DICTIONARY_CATALOG: list[dict[str, Any]] = [
 ]
 
 
+@dataclass(frozen=True)
+class SenseItem:
+    """保留義項層級的語言、來源、詞性、語體與順序（原文與繁中顯示並存）。"""
+
+    text: str
+    raw_text: str
+    lang: str               # "zh" | "ja" | "en"
+    dict_name: str
+    dict_kind: str          # "bilingual" | "monolingual"
+    pos: str = ""
+    register: str = ""      # e.g. "arch" | "obs" | "hist" | "col" | "sl" | "fam" | "suf" | "derog"
+    order: int = 0
+    score: int = 0
+
+
 @dataclass
 class DictEntry:
     term: str
@@ -120,6 +137,51 @@ class LookupMatch:
     def all_entries(self) -> list[DictEntry]:
         return self.bilingual_entries + self.monolingual_entries
 
+    def structured_senses(
+        self,
+        lang: str | None = None,
+        max_senses: int = 6,
+        convert_tw: bool = True,
+    ) -> list[SenseItem]:
+        """提取含語言、來源、詞性、語體標記的結構化義項清單。"""
+        items = extract_structured_senses(self.all_entries, max_per_lang=max_senses, convert_tw=convert_tw)
+        if lang is None:
+            return items
+        return [s for s in items if s.lang == lang][:max_senses]
+
+    def senses_by_language(self, max_per_lang: int = 6, convert_tw: bool = True) -> dict[str, list[SenseItem]]:
+        """依明確語言標記將義項分流為繁中（zh）、日日（ja）、日英（en）。"""
+        grouped: dict[str, list[SenseItem]] = {"zh": [], "ja": [], "en": []}
+        for item in extract_structured_senses(self.all_entries, max_per_lang=max_per_lang, convert_tw=convert_tw):
+            if item.lang in grouped and len(grouped[item.lang]) < max_per_lang:
+                grouped[item.lang].append(item)
+        return grouped
+
+    def best_sense_with_fallback(
+        self,
+        preference: str = "bilingual",
+        strict: bool = False,
+        convert_tw: bool = True,
+    ) -> tuple[str, str, str]:
+        """依偏好回傳 (主釋義, 實際語言, 備援標籤)；無可信中文時明確標記「日英備援」或「日日備援」。"""
+        by_lang = self.senses_by_language(max_per_lang=4, convert_tw=convert_tw)
+        if preference == "monolingual":
+            if by_lang["ja"]:
+                return by_lang["ja"][0].text, "ja", ""
+            if not strict:
+                if by_lang["zh"]:
+                    return by_lang["zh"][0].text, "zh", "繁中備援"
+                if by_lang["en"]:
+                    return by_lang["en"][0].text, "en", "日英備援"
+            return "", "", ""
+        if by_lang["zh"]:
+            return by_lang["zh"][0].text, "zh", ""
+        if by_lang["en"]:
+            return by_lang["en"][0].text, "en", "日英備援"
+        if not strict and by_lang["ja"]:
+            return by_lang["ja"][0].text, "ja", "日日備援"
+        return "", "", ""
+
     def concise_senses(
         self,
         preference: str = "bilingual",
@@ -143,12 +205,13 @@ class LookupMatch:
                 if zh_senses:
                     senses = zh_senses
             first = senses[0]
-            # 僅當首義項極短（<= 3 字且不含多義分隔）且第二義項完全不重疊、亦偏短時才補充 1 條近義
+            # 僅當首義項極短（<= 3 字且不含多義分隔）且第二義項非地名/衍生長詞且完全不重疊時才補充 1 條近義
             if (
                 len(first) <= 3
                 and not re.search(r"[、，,；;。！？]", first)
                 and len(senses) > 1
                 and len(senses[1]) <= 10
+                and not (len(first) >= 2 and senses[1].startswith(first))
                 and not _senses_semantically_overlap(first, senses[1])
             ):
                 return f"{first}、{senses[1]}"
@@ -177,25 +240,215 @@ class LookupMatch:
 _INFLECTION_STUB_RE = re.compile(
     r"(?:^[\u3040-\u9fff々ー]*\s*(?:continuative|stem|attributive|imperative|hypothetical|"
     r"past tense|conjunctive|negative|passive|causative|potential|inflection of|form of|verb form|adverbial form)|"
-    r"redirected from|alternative kanji|alternative spelling|alternative form of|obsolete spelling)",
+    r"redirected from|alternative kanji|alternative spelling|alternative form of|obsolete spelling|"
+    r"alt-of$|alternative$|transliteration\b|^⟶|「[^」]+」を参照)",
     re.IGNORECASE,
 )
 
 _SKIP_SENSE_LINE_RE = re.compile(
-    r"^(?:例：|　例：|see:|cf\.|compare|\d{4}[，,年]|Wiktionary|redirected from|.*redirected from|"
-    r".*alternative kanji|.*alternative spelling|平假名音[节節]|片假名音[节節]|音[节節][ぁ-んァ-ン]|"
-    r"[ぁ-んァ-ンー\s・]+$|(?:男性|女性)?人名$|姓氏$|地名$|名字$|大阿[尔爾]克那|須弥山|ૐ|和文通話表|"
-    r"〈[^〉]+〉|.*（[★🅁①-⑨]）$|as\s+[\u3040-\u9fff]|"
+    r"^(?:例：|　例：|see:|see also|cf\.|compare|\d{4}[，,年]|Wiktionary|JMdict\b|Tatoeba|forms\b|Note$|"
+    r"redirected from|.*redirected from|最早[见見][于於]|最早引文|可考[于於]|原[为為]\s*[\u3040-\u9fff]|"
+    r".*alternative kanji|.*alternative spelling|.*alt-of$|.*alternative$|.*transliteration\b|"
+    r"⟶.*|（[^）]+）「[^」]+」を参照|「[^」]+」を参照|同上[。.]?$|略$|解剖[学學]$|"
+    r"平假名音[节節]|片假名音[节節]|音[节節][ぁ-んァ-ン]|"
+    r"(?:男性|女性)?人名$|姓氏$|地名$|名字$|大阿[尔爾]克那|須弥山|ૐ|和文通話表|"
+    r"〈[^〉]+〉|.*（[★🅁①-⑨]）$|as\s+[\u3040-\u9fff]|from\s+[\u3040-\u9fff]|abbr\.\s+of\s+|usu\.\s+as\s+|"
+    r"(?:(?:inf|col|arch|obs|hist|sl|vulg|derog|pol|hum|hon|abbr|uk|fam|id|chn|exp|noun|verb|"
+    r"adverb|adjective|pronoun|particle|interjection|kana|slang|colloquial|childish|"
+    r"na-adj|no-adj|i-adj|5-dan|1-dan|ichidan|godan|suru|transitive|intransitive|go-on|kan-on)[\s,.]*)+$|"
     r"(?:非形式的|形式的|口語|文語|俗語|雅語|古語|廃語|方言|卑語|敬語|謙譲語|丁寧語|尊敬語|"
     r"自五|他五|自他五|自一|他一|自他一|自サ|他サ|自動|他動|自動詞|他動詞|自他動|"
     r"名詞|動詞|形容詞|形容動詞|副詞|感動詞|接続詞|連体詞|代名詞|接尾辞|接頭辞|"
     r"形|形動|名|副|感|連|接|代|接尾|接頭)$)",
     re.IGNORECASE,
 )
+_PURE_KANA_LINE_RE = re.compile(r"^[ぁ-んァ-ンー\s・]+$")
+
+# Jitendex 舊版匯入時黏連在英文義項前的標籤（刻意排除單獨 exp 誤傷 expect/explain，exp 須後接其他標籤或 "to "）
+_JITENDEX_TAG_TOKEN = (
+    r"(?:expression|noun|verb|adverb|adjective|pronoun|particle|conjunction|interjection|"
+    r"counter|auxiliary|prefix|suffix|abbr\.|colloquial|slang|childish|archaic|dated|obsolete|"
+    r"vulgar|derogatory|honorific|humble|polite|familiar|formal|literary|poetic|rare|sensitive|"
+    r"idiomatic|idiom|proverb|onomatopoeia|wasei|historical|jocular|euphemistic|"
+    r"physics|biology|anatomy|chemistry|medicine|mathematics|law|finance|business|military|"
+    r"linguistics|grammar|computing|internet|sports|baseball|music|food|mahjong|shogi|sumo|"
+    r"Buddhism|Shinto|Christianity|no-adj|na-adj|i-adj|taru-adj|ku-adj|suru|transitive|"
+    r"intransitive|kana|[15]-dan|ichidan|godan|kuru|irregular|n-pref|n-suf)"
+)
+_JITENDEX_GLUED_POS_RE = re.compile(
+    rf"^(?:exp(?={_JITENDEX_TAG_TOKEN}|to\s)|{_JITENDEX_TAG_TOKEN})+",
+)
+_KATAKANA_LOANWORD_RE = re.compile(r"^[ァ-ヶー・ヴ]{2,}$")
+_HIRAGANA_ONLY_RE = re.compile(r"^[ぁ-んー]+$")
+_FOREIGN_LANG_NOTE_RE = re.compile(
+    r"^(German|French|Dutch|Portuguese|Italian|Spanish|Russian|Latin|Greek):\s*(.+)$",
+    re.IGNORECASE,
+)
+_LANG_ZH_MAP = {
+    "german": "德",
+    "french": "法",
+    "dutch": "荷",
+    "portuguese": "葡",
+    "italian": "義",
+    "spanish": "西",
+    "russian": "俄",
+    "latin": "拉",
+    "greek": "希",
+}
+_REGISTER_TOKENS = ("arch", "obs", "hist", "derog", "vulg", "col", "sl", "fam", "hon", "hum", "pol", "suf", "chn")
+
+
+def is_katakana_loanword(term: str) -> bool:
+    """判斷詞頭是否為純片假名外來語（至少 2 字元，如 ロボット、システム、エネルギー）。"""
+    return bool(_KATAKANA_LOANWORD_RE.match((term or "").strip()))
+
+
+def _strip_jitendex_pos_prefix(text: str) -> str:
+    """清理 Jitendex 結構化詞條黏連在英文義項前的詞性前綴（相容已匯入舊庫）。"""
+    m = _JITENDEX_GLUED_POS_RE.match(text)
+    if not m:
+        return text
+    rest = text[m.end():].strip()
+    rest = re.sub(r"^\(spec\.\)\s*(?:intransitive|transitive)\s*", "", rest)
+    if rest and re.match(r"^[A-Za-z(]", rest):
+        return rest
+    return text
+
+
+def classify_entry_language(entry: DictEntry) -> str:
+    """依來源詞典與實際文字明確區分義項語言：zh（繁中）/ ja（日日）/ en（日英），不單靠漢字誤判。"""
+    if entry.dict_kind == "monolingual":
+        return "ja"
+    low = (entry.dict_name or "").lower()
+    if any(k in low for k in ("jmdict", "jitendex", "en-")) or low in ("en", "english"):
+        return "en"
+    if any(k in low for k in ("ja-zh", "zh", "中", "雙語", "双语", "漢", "汉")):
+        return "zh"
+    sample = " ".join(entry.glosses[:2])
+    return "zh" if _is_chinese_gloss(sample) else "en"
+
+
+def _extract_register_tag(pos: str) -> str:
+    low = f" {(pos or '').lower()} "
+    found = [tok for tok in _REGISTER_TOKENS if re.search(rf"(?<![a-z]){tok}(?![a-z])", low)]
+    return " ".join(found)
+
+
+@lru_cache(maxsize=1)
+def _get_opencc_s2twp() -> Any:
+    try:
+        import opencc  # type: ignore[import-not-found]
+
+        return opencc.OpenCC("s2twp.json")
+    except Exception:
+        return None
+
+
+_S2TW_PHRASES: tuple[tuple[str, str], ...] = (
+    ("国家统治者", "國家統治者"),
+    ("君主国", "君主國"),
+    ("称谓后缀", "稱謂後綴"),
+    ("后接于", "後接於"),
+    ("总之", "總之"),
+    ("暂且", "暫且"),
+    ("机会", "機會"),
+    ("或许", "或許"),
+    ("确实", "確實"),
+    ("认真", "認真"),
+    ("实打实", "實打實"),
+    ("办不到", "辦不到"),
+    ("车站", "車站"),
+    ("领主", "領主"),
+    ("贵族", "貴族"),
+    ("应招", "應招"),
+    ("应征", "應徵"),
+    ("意图", "意圖"),
+    ("分别", "分別"),
+    ("分离", "分離"),
+    ("系统", "系統"),
+    ("体系", "體系"),
+    ("变得", "變得"),
+    ("严重", "嚴重"),
+    ("厉害", "厲害"),
+    ("合并", "合併"),
+    ("合计", "合計"),
+    ("没有", "沒有"),
+    ("无", "無"),
+)
+
+
+def normalize_zh_tw(text: str) -> str:
+    """將已確認為中文的釋義轉為台灣正體顯示（優先使用 OpenCC s2twp，無套件時使用內建映射）。"""
+    if not text or not _is_chinese_gloss(text):
+        return text
+    cc = _get_opencc_s2twp()
+    if cc is not None:
+        try:
+            return str(cc.convert(text))
+        except Exception:
+            pass
+    out = text
+    for src, dst in _S2TW_PHRASES:
+        if src in out:
+            out = out.replace(src, dst)
+    return out.translate(_S2T_NORM)
+
+
+def extract_loanword_origins(
+    entries: list[DictEntry],
+    term: str,
+    max_items: int = 3,
+) -> list[str]:
+    """針對片假名外來語，從雙語詞典（JMdict／Jitendex）精準提取對應英文／外文原詞。"""
+    if not is_katakana_loanword(term) or not entries:
+        return []
+    origins: list[str] = []
+    seen: set[str] = set()
+    for entry in entries[:6]:
+        if entry.dict_kind != "bilingual":
+            continue
+        entry_added = 0
+        for g in entry.glosses[:4]:
+            cleaned = _clean_gloss_noise(g)
+            if not cleaned:
+                continue
+            for raw_ln in cleaned.splitlines():
+                ln = raw_ln.strip()
+                if not ln:
+                    continue
+                if _SKIP_SENSE_LINE_RE.match(ln) or _INLINE_FURIGANA_RE.search(ln):
+                    continue
+                if re.search(r"[\u3040-\u9fff]", ln):
+                    continue
+                ln = _strip_jitendex_pos_prefix(ln).strip(" ;,.")
+                if not ln or _SKIP_SENSE_LINE_RE.match(ln):
+                    continue
+                fm = _FOREIGN_LANG_NOTE_RE.match(ln)
+                if fm:
+                    lang_zh = _LANG_ZH_MAP.get(fm.group(1).lower(), fm.group(1))
+                    ln = f"{fm.group(2).strip()} ({lang_zh})"
+                if ";" in ln or ln.startswith(('"', "'")) or len(ln.split()) > 3 or len(ln) > 28:
+                    continue
+                if not re.search(r"[A-Za-z]{2,}", ln):
+                    continue
+                key = ln.lower()
+                if key in seen or any(key in s or s in key for s in seen if len(s) >= 4):
+                    continue
+                seen.add(key)
+                origins.append(ln)
+                entry_added += 1
+                if len(origins) >= max_items:
+                    return origins
+                if entry_added >= 2:
+                    break
+            if entry_added >= 2:
+                break
+    return origins
+
 
 _CITATION_LINE_RE = re.compile(
     r"(?:→ISBN|ISBN\b|虛構作品|虚构作品|頁：|ページ：|^\d{4}年\s*\d+月|收錄於|收录于|"
-    r"^[（\(][^）\)]{1,20}『[^』]+』[）\)]$)"
+    r"^[（\(][^）\)]{1,32}『[^』]+』[^）\)]*[）\)]$)"
 )
 _INLINE_CIRCLED_SPLIT_RE = re.compile(r"\s*(?=[①-⑨])")
 _ASCII_DOMAIN_TAG_RE = re.compile(r"^[A-Za-z][A-Za-z\s/-]{0,20}$")
@@ -204,10 +457,15 @@ _INLINE_FURIGANA_RE = re.compile(r"[\u4e00-\u9fff々]\([ぁ-んァ-ヶー]{1,6}\
 _LEADING_POS_NOISE_RE = re.compile(
     r"^(?:(?:[1-9][\.\、\s]+|[①-⑨]\s*)|(?:(?:名|動|自|他|形|形動|副|サ|五|一|感|連|接)[・?？/\s]+)+)+"
 )
-_S2T_NORM = str.maketrans(
-    "学语词义觉听说见现关开门间时书车东飞机气电话读写买卖进过还这个们实际边点头脸声响乐欢爱恋梦变动运经验结构组织认识记忆决定选择应该帮助给让离别对错难简单复杂强弱轻长远广满静温热凉干湿脏净坏伤惊担忧烦恼愿望兴够准备计划练习试战胜负护救杀醒飞游击碎断烧扫画唱弹照录播传送借换赔赚费贵贱穷约规则律权责任务业职馆院厂场港桥路镇城国陆岛湾雾雷风云阳阴树叶种麦鸟鸡鸭鹅猪猫马龙龟虫兽严厉征应体烫发内众",
-    "學語詞義覺聽說見現關開門間時書車東飛機氣電話讀寫買賣進過還這個們實際邊點頭臉聲響樂歡愛戀夢變動運經驗結構組織認識記憶決定選擇應該幫助給讓離別對錯難簡單複雜強弱輕長遠廣滿靜溫熱涼乾濕髒淨壞傷驚擔憂煩惱願望興夠準備計劃練習試戰勝負護救殺醒飛游擊碎斷燒掃畫唱彈照錄播傳送借換賠賺費貴賤窮約規則律權責任務業職館院廠場港橋路鎮城國陸島灣霧雷風雲陽陰樹葉種麥鳥雞鴨鵝豬貓馬龍龜蟲獸嚴厲徵應體燙發內眾",
+_S2T_SRC = (
+    "学语词义觉听说见现关开门间时书车东飞机气电话读写买卖进过还这个们实际边点头脸声响乐欢爱恋梦变动运经验结构组织认识记忆决定选择应该帮助给让离别对错难简单复杂强弱轻长远广满静温热凉干湿脏净坏伤惊担忧烦恼愿望兴够准备计划练习试战胜负护救杀醒飞游击碎断烧扫画唱弹照录播传送借换赔赚费贵贱穷约规则律权责任务业职馆院厂场港桥路镇城国陆岛湾雾雷风云阳阴树叶种麦鸟鸡鸭鹅猪猫马龙龟虫兽严厉征应体烫发内众"
+    "统称谓缀暂认确办站领贵习图无总虽举几类叙毕"
 )
+_S2T_DST = (
+    "學語詞義覺聽說見現關開門間時書車東飛機氣電話讀寫買賣進過還這個們實際邊點頭臉聲響樂歡愛戀夢變動運經驗結構組織認識記憶決定選擇應該幫助給讓離別對錯難簡單複雜強弱輕長遠廣滿靜溫熱涼乾濕髒淨壞傷驚擔憂煩惱願望興夠準備計劃練習試戰勝負護救殺醒飛游擊碎斷燒掃畫唱彈照錄播傳送借換賠賺費貴賤窮約規則律權責任務業職館院廠場港橋路鎮城國陸島灣霧雷風雲陽陰樹葉種麥鳥雞鴨鵝豬貓馬龍龜蟲獸嚴厲徵應體燙發內眾"
+    "統稱謂綴暫認確辦站領貴習圖無總雖舉幾類敘畢"
+)
+_S2T_NORM = str.maketrans(_S2T_SRC, _S2T_DST)
 _ATOM_SPLIT_RE = re.compile(r"[、，,；;／/\s。！？!?·・]+")
 _PAREN_STRIP_RE = re.compile(r"[（\(][^）\)]*[）\)]")
 
@@ -256,10 +514,18 @@ def _senses_semantically_overlap(a: str, b: str) -> bool:
 def _extract_senses_dedup(entries: list[DictEntry], max_senses: int = 6) -> list[str]:
     return extract_concise_senses(entries, max_senses=max_senses)
 
+
 _ETYMOLOGY_HEAD_RE = re.compile(r"^(?:词源|詞源|語源|语源|Etymology\b)")
 _ETYMOLOGY_CONT_RE = re.compile(
-    r"(?:词源|詞源|語源|语源|派生自|源自|原意|上古|中古|中世|室町|平安|江戸|江户|古旧|同源|原始日語|原始日语)"
+    r"(?:词源|詞源|語源|语源|派生自|源自|原意|上古|中古|中世|室町|平安|江戸|江户|古旧|同源|"
+    r"原始日語|原始日语|縮略|缩略|變換自|变换自|截斷形式|截断形式|和製英語|和制英语|"
+    r"詞彙.*由以下|词汇.*由以下|字面意思|熟字訓|熟字训|沒有末尾|没有末尾|首次出現|首次出现|"
+    r"最早出現|最早出现|最早引文|變自|变自|轉變自|转变自|可能是|讀法|读法|根據.*所說|根据.*所说|"
+    r"フリー百科事典|ウィキペディア|\[Alt:|日本祖語|古典日本語|連濁|连浊|の転|の略|の縮約)"
 )
+_ETYMOLOGY_RUBY_COMP_RE = re.compile(r"^[\u4e00-\u9fffぁ-んァ-ヶ々]+(?:\([ぁ-んァ-ヶa-zA-Z]+\))?\s*\([a-zA-Zāīūēō]+[,，]")
+_NUMBERED_ZH_SENSE_RE = re.compile(r"^\d{1,2}\s*[.．、]\s*([（(\u3400-\u9fff].*)$")
+_ETYMOLOGY_BRIDGE_LINES = {"發展", "发展", "演變", "演变"}
 _WTY_EX_COUNT_RE = re.compile(r"(\d+)\s*例")
 _HAS_KANJI_RE = re.compile(r"[\u4e00-\u9fff々]")
 _HAS_JP_KANA_RE = re.compile(r"[ぁ-んァ-ン]")
@@ -280,10 +546,18 @@ def _clean_gloss_noise(text: str) -> str:
     lines = list(raw_lines)
     if _ETYMOLOGY_HEAD_RE.match(lines[0]):
         idx = 1
-        while idx < len(lines) and _ETYMOLOGY_CONT_RE.search(lines[idx]):
+        while idx < len(lines) and (
+            _ETYMOLOGY_CONT_RE.search(lines[idx])
+            or _ETYMOLOGY_RUBY_COMP_RE.match(lines[idx])
+            or lines[idx] == "]"
+            or (lines[idx].rstrip("：:") in _ETYMOLOGY_BRIDGE_LINES and idx + 1 < len(lines)
+                and _ETYMOLOGY_CONT_RE.search(lines[idx + 1]))
+        ):
             idx += 1
         if idx < len(lines):
             lines = lines[idx:]
+        else:
+            lines = []
 
     formatted: list[str] = []
     for ln in lines:
@@ -296,112 +570,173 @@ def _clean_gloss_noise(text: str) -> str:
 _EX_COUNT_MARKER_RE = re.compile(r"^[　\s]*例\[(\d+)\]：")
 
 
-def extract_concise_senses(entries: list[DictEntry], max_senses: int = 6) -> list[str]:
+def _iter_entry_clean_senses(entry: DictEntry, is_mono: bool) -> list[str]:
+    """從單一 DictEntry 抽取出乾淨獨立義項文字（去例句、詞源、轉址、詞性黏連雜訊）。"""
+    out: list[str] = []
+    entry_lang = classify_entry_language(entry)
+    head_term = (entry.term or "").strip()
+
+    for g in entry.glosses[:5]:
+        cleaned = _clean_gloss_noise(g)
+        if not cleaned:
+            continue
+        lines = cleaned.splitlines()
+        if entry_lang == "zh" and "wty" in entry.dict_name.lower():
+            numbered = [m[1] for line in lines if (m := _NUMBERED_ZH_SENSE_RE.match(line))]
+            if numbered:
+                lines = numbered
+        skip_remaining = 0
+        for raw_ln in lines:
+            ln = raw_ln.strip()
+            if not ln:
+                continue
+            if _CITATION_LINE_RE.search(ln):
+                continue
+            em = _EX_COUNT_MARKER_RE.match(ln)
+            if em:
+                n_ex = int(em.group(1))
+                skip_remaining = max(0, min(8, n_ex - 1)) if is_mono else max(1, min(12, n_ex * 2 - 1))
+                continue
+            if ln.startswith("例：") or ln.startswith("　例："):
+                skip_remaining = max(skip_remaining, 0 if is_mono else 1)
+                continue
+            if skip_remaining > 0:
+                skip_remaining -= 1
+                continue
+            if _SKIP_SENSE_LINE_RE.match(ln):
+                continue
+            if not is_mono and _PURE_KANA_LINE_RE.match(ln):
+                continue
+            if is_mono and _ASCII_DOMAIN_TAG_RE.match(ln):
+                continue
+            if _INFLECTION_STUB_RE.search(ln):
+                continue
+            if not is_mono and _INLINE_FURIGANA_RE.search(ln):
+                skip_remaining = max(skip_remaining, 1)
+                continue
+            if not is_mono:
+                if len(ln) >= 12 and len(re.findall(r"[！？!?]+", ln)) >= 2:
+                    continue
+                kana_cnt = len(re.findall(r"[ぁ-んァ-ン]", ln))
+                if kana_cnt >= 3 and ln.endswith(("。", "！", "？", "‼", "!", "?")):
+                    skip_remaining = max(skip_remaining, 1)
+                    continue
+                if kana_cnt >= 1 and len(ln) <= 6 and not re.search(r"[，,、。；;]", ln):
+                    continue
+
+            if re.match(r"^[\u3040-\u9fff々ー]+【[ぁ-んァ-ンー]+】$", ln):
+                continue
+
+            sub_parts = (
+                [p.strip() for p in _INLINE_CIRCLED_SPLIT_RE.split(ln) if p.strip()]
+                if ("①" in ln and "②" in ln)
+                else [ln]
+            )
+            for part in sub_parts:
+                cur = _strip_jitendex_pos_prefix(part).strip()
+                if not is_mono:
+                    cur = _LEADING_POS_NOISE_RE.sub("", cur).strip()
+                else:
+                    cur = re.sub(r"^[①-⑨]\s*", "", cur).strip()
+                cur = cur.strip("。；;")
+                if not cur or _SKIP_SENSE_LINE_RE.match(cur):
+                    continue
+                # 中日同形詞（如 君主 -> 君主）在中文雙語詞典中是有效核心釋義，不得誤刪導致次義「君主国」搶占首義；
+                # 僅於單語詞典或非中文條目中過濾與詞頭完全相同的回顯。
+                if cur == head_term and (is_mono or entry_lang != "zh" or not _is_chinese_gloss(cur) or len(cur) < 2):
+                    continue
+                compact = cur[:72] + ("…" if len(cur) > 72 else "")
+                out.append(compact)
+    return out
+
+
+def extract_structured_senses(
+    entries: list[DictEntry],
+    max_per_lang: int = 6,
+    *,
+    convert_tw: bool = True,
+) -> list[SenseItem]:
+    """保留義項層級的語言、來源、詞性、語體與順序，按語言分別去重（繁中／日日／日英互不汙染）。"""
+    results: list[SenseItem] = []
+    seen_norm_by_lang: dict[str, set[str]] = {"zh": set(), "ja": set(), "en": set()}
+    seen_atoms_by_lang: dict[str, set[str]] = {"zh": set(), "ja": set(), "en": set()}
+    texts_by_lang: dict[str, list[str]] = {"zh": [], "ja": [], "en": []}
+
+    order_counter = 0
+    for entry in entries[:14]:
+        is_mono = entry.dict_kind == "monolingual"
+        entry_lang = classify_entry_language(entry)
+        reg = _extract_register_tag(entry.pos)
+        for raw_sense in _iter_entry_clean_senses(entry, is_mono=is_mono):
+            lang = entry_lang
+            if lang == "zh" and not _is_chinese_gloss(raw_sense):
+                # 雙語中文詞典偶含純英文備註，不誤歸為中文
+                if re.search(r"[A-Za-z]{2,}", raw_sense) and not _HAS_JP_KANA_RE.search(raw_sense):
+                    lang = "en"
+                else:
+                    continue
+            if len(texts_by_lang[lang]) >= max_per_lang:
+                continue
+            norm = re.sub(r"[\s，,、。；;・]+", "", raw_sense.translate(_S2T_NORM).lower())
+            if not norm or norm in seen_norm_by_lang[lang]:
+                continue
+            atoms = _sense_atoms(raw_sense)
+            if atoms:
+                if atoms <= seen_atoms_by_lang[lang]:
+                    continue
+                if any(_senses_semantically_overlap(raw_sense, prev) for prev in texts_by_lang[lang]):
+                    continue
+            seen_norm_by_lang[lang].add(norm)
+            seen_atoms_by_lang[lang].update(atoms)
+            texts_by_lang[lang].append(raw_sense)
+            display_txt = normalize_zh_tw(raw_sense) if (lang == "zh" and convert_tw) else raw_sense
+            results.append(
+                SenseItem(
+                    text=display_txt,
+                    raw_text=raw_sense,
+                    lang=lang,
+                    dict_name=entry.dict_name,
+                    dict_kind=entry.dict_kind,
+                    pos=entry.pos,
+                    register=reg,
+                    order=order_counter,
+                    score=entry.score,
+                )
+            )
+            order_counter += 1
+    return results
+
+
+def extract_concise_senses(entries: list[DictEntry], max_senses: int = 6, *, prefer_chinese: bool = True) -> list[str]:
     """從多本詞典中提煉出乾淨、不重複、去例句雜訊且聚焦重點的獨立核心義項。"""
     senses: list[str] = []
     seen_norm: set[str] = set()
     seen_atoms: set[str] = set()
     is_mono_only = bool(entries) and all(e.dict_kind == "monolingual" for e in entries)
-    head_terms = {e.term for e in entries if e.term}
 
-    for entry in entries[:6]:
-        for g in entry.glosses[:5]:
-            cleaned = _clean_gloss_noise(g)
-            if not cleaned:
+    for entry in entries[:8]:
+        for compact in _iter_entry_clean_senses(entry, is_mono=is_mono_only):
+            norm = re.sub(r"[\s，,、。；;・]+", "", compact.translate(_S2T_NORM).lower())
+            if not norm or norm in seen_norm:
                 continue
-            skip_remaining = 0
-            for raw_ln in cleaned.splitlines():
-                ln = raw_ln.strip()
-                if not ln:
-                    continue
-                # 跳過 Wiktionary 引用文獻／ISBN 出處行，且不消耗例句跳行額度
-                if _CITATION_LINE_RE.search(ln):
-                    continue
-                em = _EX_COUNT_MARKER_RE.match(ln)
-                if em:
-                    # 雙語 Wiktionary 每組例句為「日文＋中文譯文」2 行；日日詞典僅 1 行日文例句
-                    n_ex = int(em.group(1))
-                    if is_mono_only:
-                        skip_remaining = max(0, min(8, n_ex - 1))
-                    else:
-                        skip_remaining = max(1, min(12, n_ex * 2 - 1))
-                    continue
-                if ln.startswith("例：") or ln.startswith("　例："):
-                    skip_remaining = max(skip_remaining, 0 if is_mono_only else 1)
-                    continue
-                if skip_remaining > 0:
-                    skip_remaining -= 1
-                    continue
-                if _SKIP_SENSE_LINE_RE.match(ln):
-                    continue
-                if is_mono_only and _ASCII_DOMAIN_TAG_RE.match(ln):
-                    continue
-                if _INFLECTION_STUB_RE.search(ln):
-                    continue
-                # 雙語模式過濾掉 Wiktionary 夾雜的帶振假名日文例句（如「この学(がっ)校(こう)は...」）
-                if not is_mono_only and _INLINE_FURIGANA_RE.search(ln):
-                    skip_remaining = max(skip_remaining, 1)
-                    continue
-                # 雙語詞條中排除整句日文例句（含假名且帶日文句末標點），並同步跳過緊接其後的中文譯文
-                if not is_mono_only:
-                    kana_cnt = len(re.findall(r"[ぁ-んァ-ン]", ln))
-                    if kana_cnt >= 3 and ln.endswith(("。", "！", "？", "‼", "!", "?")):
-                        skip_remaining = max(skip_remaining, 1)
-                        continue
-                    # 排除短日文異體／交叉引用（如「分る」「募集する」「言い募る」）
-                    if kana_cnt >= 1 and len(ln) <= 6 and not re.search(r"[，,、。；;]", ln):
-                        continue
 
-                if re.match(r"^[\u3040-\u9fff々ー]+【[ぁ-んァ-ンー]+】$", ln):
+            atoms = _sense_atoms(compact)
+            if atoms:
+                if atoms <= seen_atoms:
+                    continue
+                if any(_senses_semantically_overlap(compact, prev) for prev in senses):
                     continue
 
-                # 若單行內含多個編號義項（如「①越來越強烈 ②募集、招募」），拆分為獨立候選義項以便個別去重與語境排序
-                sub_parts = (
-                    [p.strip() for p in _INLINE_CIRCLED_SPLIT_RE.split(ln) if p.strip()]
-                    if ("①" in ln and "②" in ln)
-                    else [ln]
-                )
-                for part in sub_parts:
-                    # 清理前綴殘留詞性標記（如「名?自 サ 应招」→「应招」、「1. 热空气。」→「热空气」）
-                    cur = re.sub(
-                        r"^(?:[15]-dan|ichidan|godan|suru|kuru)(?:in)?transitive\s*",
-                        "",
-                        part,
-                        flags=re.IGNORECASE,
-                    ).strip()
-                    if not is_mono_only:
-                        cur = _LEADING_POS_NOISE_RE.sub("", cur).strip()
-                    else:
-                        cur = re.sub(r"^[①-⑨]\s*", "", cur).strip()
-                    cur = cur.strip("。；;")
-                    if not cur or cur in head_terms or _SKIP_SENSE_LINE_RE.match(cur):
-                        continue
-
-                    compact = cur[:72] + ("…" if len(cur) > 72 else "")
-                    norm = re.sub(r"[\s，,、。；;・]+", "", compact.translate(_S2T_NORM).lower())
-                    if not norm or norm in seen_norm:
-                        continue
-
-                    # 語意原子子集／高重疊去重：徹底消除「外面、外部、戶外」之後又出現「外面」的重複現象！
-                    atoms = _sense_atoms(compact)
-                    if atoms:
-                        if atoms <= seen_atoms:
-                            continue
-                        if any(_senses_semantically_overlap(compact, prev) for prev in senses):
-                            continue
-
-                    seen_norm.add(norm)
-                    seen_atoms.update(atoms)
-                    senses.append(compact)
-                    if len(senses) >= max_senses * 3:
-                        break
-                if len(senses) >= max_senses * 3:
-                    break
+            seen_norm.add(norm)
+            seen_atoms.update(atoms)
+            senses.append(compact)
+            if len(senses) >= max_senses * 3:
+                break
         if len(senses) >= max_senses * 3:
             break
 
     # 雙語模式：只要已有真正中文核心釋義，就直接隱藏多餘英文詞典重複義項，讓 Anki 卡片與膠囊聚焦中文重點！
-    if not is_mono_only:
+    if prefer_chinese and not is_mono_only:
         zh_senses = [s for s in senses if _is_chinese_gloss(s)]
         if zh_senses:
             return zh_senses[:max_senses]
@@ -409,25 +744,44 @@ def extract_concise_senses(entries: list[DictEntry], max_senses: int = 6) -> lis
 
 
 def _is_inflection_stub_entries(entries: list[DictEntry]) -> bool:
-    """判斷查到的詞條是否全都是屈折存根、重定向或方言/口語縮略干擾（如「怖く -> 怖いcontinuative」或方言「したら」）。"""
+    """判斷查到的詞條是否全都是屈折存根、重定向或方言干擾（保留真實現代口語 col / 縮略 abbr 詞條如 ガチ、とりま）。"""
     if not entries:
         return False
-    # 若最高優先條目全部標記為 dialect / non-lemma / col / abbr，應優先嘗試標準語活用還原（如 したら -> する）
     if all(
-        any(tag in e.pos.lower() for tag in ("dialect", "non-lemma", "char", "col", "abbr"))
+        any(tag in e.pos.lower() for tag in ("dialect", "non-lemma", "char", "forms"))
         for e in entries[:2]
     ):
         return True
     for entry in entries:
-        for g in entry.glosses:
-            for ln in _clean_gloss_noise(g).splitlines():
-                if ln.strip() and not _INFLECTION_STUB_RE.search(ln):
-                    return False
+        is_mono = entry.dict_kind == "monolingual"
+        if _iter_entry_clean_senses(entry, is_mono=is_mono):
+            return False
     return True
 
 
+_JITENDEX_BLOCK_DATA_TYPES = frozenset(
+    {
+        "part-of-speech-info",
+        "misc-info",
+        "field-info",
+        "dialect-info",
+        "info-gloss",
+        "glossary",
+        "sense-group",
+        "example-sentence",
+        "example-sentence-a",
+        "example-sentence-b",
+        "xref",
+        "antonym",
+        "notes",
+        "forms",
+        "attribution",
+    }
+)
+
+
 def _extract_yomitan_text(node: Any) -> str:
-    """遞迴解析 Yomitan structured-content 與純字串釋義為乾淨文本。"""
+    """遞迴解析 Yomitan structured-content（尊重 Jitendex 節點邊界避免標籤黏連）與純字串釋義。"""
     if node is None:
         return ""
     if isinstance(node, str):
@@ -442,11 +796,13 @@ def _extract_yomitan_text(node: Any) -> str:
         if node_type == "text":
             return str(node.get("text", ""))
         tag = node.get("tag", "")
+        data = node.get("data")
+        data_content = str(data.get("content", "")) if isinstance(data, dict) else ""
         content = _extract_yomitan_text(node.get("content"))
-        if tag in ("li", "div", "p", "br"):
-            return f"{content}\n" if content else "\n"
         if tag == "rt":
             return f"({content})" if content else ""
+        if tag in ("li", "div", "p", "br", "tr", "dt", "dd") or data_content in _JITENDEX_BLOCK_DATA_TYPES:
+            return f"{content}\n" if content else "\n"
         return content
     return str(node)
 
@@ -525,22 +881,34 @@ class DictionaryEngine:
             CREATE INDEX IF NOT EXISTS idx_meta_term ON term_meta(term);
             """
         )
-        # 安全遷移既有資料庫：補上 enabled 欄位（不遺失任何已安裝詞典）
+        # 安全遷移既有資料庫：補上可選欄位（舊庫完全相容，不遺失任何已安裝詞典）
         cols = {row["name"] for row in cur.execute("PRAGMA table_info(dictionaries)").fetchall()}
         if "enabled" not in cols:
             cur.execute("ALTER TABLE dictionaries ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1")
+        if "source_id" not in cols:
+            cur.execute("ALTER TABLE dictionaries ADD COLUMN source_id TEXT NOT NULL DEFAULT ''")
+        if "license" not in cols:
+            cur.execute("ALTER TABLE dictionaries ADD COLUMN license TEXT NOT NULL DEFAULT ''")
         self._conn.commit()
 
     def list_dictionaries(self) -> list[dict[str, Any]]:
         with self._lock:
+            cols = {row["name"] for row in self._conn.execute("PRAGMA table_info(dictionaries)").fetchall()}
+            extra_sel = ""
+            if "source_id" in cols:
+                extra_sel += ", source_id"
+            if "license" in cols:
+                extra_sel += ", license"
             rows = self._conn.execute(
-                "SELECT id, name, kind, revision, entry_count, priority, enabled "
+                f"SELECT id, name, kind, revision, entry_count, priority, enabled{extra_sel} "
                 "FROM dictionaries ORDER BY priority ASC, id ASC"
             ).fetchall()
         out = []
         for r in rows:
             d = dict(r)
             d["enabled"] = bool(d.get("enabled", 1))
+            d.setdefault("source_id", "")
+            d.setdefault("license", "")
             out.append(d)
         return out
 
@@ -570,28 +938,105 @@ class DictionaryEngine:
                 )
             self._conn.commit()
 
+    def get_en_fallback_source(self) -> str:
+        """回傳目前啟用的日英備援模式：jmdict / jitendex / both / none。"""
+        dicts = self.list_dictionaries()
+        has_jm = any("jmdict" in d["name"].lower() and d["enabled"] for d in dicts)
+        has_jt = any("jitendex" in d["name"].lower() and d["enabled"] for d in dicts)
+        if has_jm and has_jt:
+            return "both"
+        if has_jm:
+            return "jmdict"
+        if has_jt:
+            return "jitendex"
+        return "none"
+
+    def set_en_fallback_source(self, mode: str) -> None:
+        """獨立設定日英備援來源（jmdict / jitendex / both / none），不影響中文、日日與音調詞頻庫。"""
+        mode_low = (mode or "jmdict").lower()
+        with self._lock:
+            for d in self.list_dictionaries():
+                low = d["name"].lower()
+                is_jm = "jmdict" in low
+                is_jt = "jitendex" in low
+                if not (is_jm or is_jt):
+                    continue
+                if mode_low == "jmdict":
+                    en = is_jm
+                    prio = 10 if is_jm else 25
+                elif mode_low == "jitendex":
+                    en = is_jt
+                    prio = 10 if is_jt else 25
+                elif mode_low == "both":
+                    en = True
+                    prio = 10 if is_jm else 25
+                else:
+                    en = False
+                    prio = d["priority"]
+                self._conn.execute(
+                    "UPDATE dictionaries SET enabled = ?, priority = ? WHERE id = ?",
+                    (1 if en else 0, prio, d["id"]),
+                )
+            self._conn.commit()
+
     def apply_dictionary_preset(self, preset: str) -> None:
-        """一鍵套用學習階段詞典啟用組合：zh_focus（只開中文＋音調詞頻）/ mono_focus（日日單語）/ all。"""
+        """將「可被查詢」與「優先顯示順序」分離：預設保留日日與單一日英備援供語塊查詞，不再一刀切斷慣用語覆蓋。"""
         with self._lock:
             dicts = self.list_dictionaries()
+            has_jmdict = any("jmdict" in d["name"].lower() for d in dicts)
             for d in dicts:
                 name_low = d["name"].lower()
                 kind = d["kind"]
+                is_jm = "jmdict" in name_low
+                is_jt = "jitendex" in name_low
+                is_builtin_spoken = "口語核心詞庫" in d["name"]
+                is_starter = "內建精選" in d["name"]
+                is_zh_dict = (kind == "bilingual") and not (is_jm or is_jt)
+
                 if preset == "all":
                     enabled = True
+                    prio = d["priority"]
                 elif preset == "zh_focus":
-                    # 保留中文雙語詞典 + 音調/詞頻 + 內建精選中文；關閉純英文 JMdict / Jitendex 避免雜訊！
-                    is_en_only = ("jmdict" in name_low or "jitendex" in name_low)
-                    enabled = (kind == "meta") or (kind == "bilingual" and not is_en_only)
+                    # 繁中優先：保留中文主力 + 日日 + 單一日英備援（優先較乾淨的 JMdict）+ 音調詞頻供語塊與查詞使用
+                    enabled = not (is_jt and has_jmdict)
+                    if is_builtin_spoken:
+                        prio = 1 if kind == "bilingual" else 2
+                    elif is_zh_dict and not is_starter:
+                        prio = 5
+                    elif is_jm:
+                        prio = 10
+                    elif kind == "monolingual" and not is_starter:
+                        prio = 15
+                    elif is_jt:
+                        prio = 25
+                    elif kind == "meta":
+                        prio = d["priority"] if d["priority"] >= 40 else 40
+                    else:
+                        prio = d["priority"]
                 elif preset == "mono_focus":
-                    # Lv.3 登樓撤梯：以日日單語 + 音調/詞頻為主，只留日中當安全網，關掉英文
-                    is_en_only = ("jmdict" in name_low or "jitendex" in name_low)
-                    enabled = (kind in ("monolingual", "meta")) or (kind == "bilingual" and not is_en_only)
+                    # Lv.3 日日優先：保留日日主力 + 繁中安全網 + 單一日英備援 + 音調詞頻
+                    enabled = not (is_jt and has_jmdict)
+                    if is_builtin_spoken:
+                        prio = 1 if kind == "monolingual" else 2
+                    elif kind == "monolingual" and not is_starter:
+                        prio = 5
+                    elif is_zh_dict and not is_starter:
+                        prio = 10
+                    elif is_jm:
+                        prio = 15
+                    elif is_jt:
+                        prio = 25
+                    elif kind == "meta":
+                        prio = d["priority"] if d["priority"] >= 40 else 40
+                    else:
+                        prio = d["priority"]
                 else:
                     enabled = True
+                    prio = d["priority"]
+
                 self._conn.execute(
-                    "UPDATE dictionaries SET enabled = ? WHERE id = ?",
-                    (1 if enabled else 0, d["id"]),
+                    "UPDATE dictionaries SET enabled = ?, priority = ? WHERE id = ?",
+                    (1 if enabled else 0, prio, d["id"]),
                 )
             self._conn.commit()
 
@@ -703,8 +1148,10 @@ class DictionaryEngine:
         kind_override: str | None = None,
         progress: ProgressCallback | None = None,
         priority_override: int | None = None,
+        source_id: str | None = None,
+        license_text: str | None = None,
     ) -> dict[str, Any]:
-        """匯入任意標準 Yomitan .zip 詞典（完整支援詞條、音調與詞頻檔）。"""
+        """原子化匯入 Yomitan .zip 詞典：先寫入暫存版本，確認成功才切換並保留使用者原本的啟用與排序設定。"""
         with zipfile.ZipFile(zip_path, "r") as zf:
             names = zf.namelist()
             if "index.json" not in names:
@@ -713,9 +1160,18 @@ class DictionaryEngine:
             index_data = json.loads(zf.read("index.json").decode("utf-8"))
             title = str(index_data.get("title") or zip_path.stem)
             revision = str(index_data.get("revision") or "")
+            final_license = str(
+                license_text
+                or index_data.get("attribution")
+                or index_data.get("license")
+                or ""
+            )[:400]
+            stable_source = (source_id or "").strip()
 
             term_banks = sorted(n for n in names if re.match(r"^(?:.*/)?term_bank_\d+\.json$", n))
             meta_banks = sorted(n for n in names if re.match(r"^(?:.*/)?term_meta_bank_\d+\.json$", n))
+            if not term_banks and not meta_banks:
+                raise ValueError("此詞典壓縮檔不含 term_bank 或 term_meta_bank 資料。")
 
             sample_gloss = ""
             if term_banks:
@@ -733,147 +1189,212 @@ class DictionaryEngine:
             else:
                 kind = _guess_dict_kind(title, sample_gloss)
 
-            # 若同名詞典已存在，先刪除重建
-            existing = self._conn.execute(
-                "SELECT id FROM dictionaries WHERE name = ?", (title,)
-            ).fetchone()
-            if existing:
-                self.delete_dictionary(existing["id"])
+            with self._lock:
+                cols = {row["name"] for row in self._conn.execute("PRAGMA table_info(dictionaries)").fetchall()}
+                has_source_col = "source_id" in cols
+                has_lic_col = "license" in cols
 
-            if priority_override is not None:
-                priority = priority_override
-            elif kind == "bilingual":
-                priority = 5 if any(k in title.lower() for k in ("zh", "中", "漢", "汉")) else 20
-            elif kind == "monolingual":
-                priority = 15
-            else:
-                priority = 40
+                existing = None
+                if stable_source and has_source_col:
+                    existing = self._conn.execute(
+                        "SELECT id, enabled, priority FROM dictionaries WHERE source_id = ?",
+                        (stable_source,),
+                    ).fetchone()
+                if existing is None:
+                    existing = self._conn.execute(
+                        "SELECT id, enabled, priority FROM dictionaries WHERE name = ?",
+                        (title,),
+                    ).fetchone()
 
-            cur = self._conn.cursor()
-            cur.execute(
-                "INSERT INTO dictionaries (name, kind, revision, entry_count, priority) VALUES (?, ?, ?, ?, ?)",
-                (title, kind, revision, 0, priority),
-            )
-            dict_id = cur.lastrowid
-
-            total_files = max(1, len(term_banks) + len(meta_banks))
-            processed = 0
-            total_terms = 0
-            total_meta = 0
-            batch: list[tuple[Any, ...]] = []
-
-            for bank_name in term_banks:
-                entries = json.loads(zf.read(bank_name).decode("utf-8"))
-                for row in entries:
-                    if not isinstance(row, list) or len(row) < 6:
-                        continue
-                    term = str(row[0] or "").strip()
-                    reading = str(row[1] or "").strip() or term
-                    tags = str(row[2] or "")
-                    rules = str(row[3] or "")
-                    pos = ",".join(p for p in (rules, tags) if p)
-                    score = int(row[4] or 0) if isinstance(row[4], (int, float)) else 0
-                    raw_glosses = row[5]
-                    gloss_list: list[str] = []
-                    if isinstance(raw_glosses, list):
-                        for g in raw_glosses:
-                            txt = re.sub(r"\n{2,}", "\n", _extract_yomitan_text(g)).strip()
-                            if txt:
-                                gloss_list.append(txt)
+                if existing is not None:
+                    old_id = int(existing["id"])
+                    keep_enabled = int(existing["enabled"])
+                    priority = int(existing["priority"])
+                else:
+                    old_id = None
+                    keep_enabled = 1
+                    if priority_override is not None:
+                        priority = priority_override
+                    elif kind == "bilingual":
+                        priority = 5 if any(k in title.lower() for k in ("zh", "中", "漢", "汉")) else 20
+                    elif kind == "monolingual":
+                        priority = 15
                     else:
-                        txt = _extract_yomitan_text(raw_glosses).strip()
-                        if txt:
-                            gloss_list.append(txt)
+                        priority = 40
 
-                    if not term or not gloss_list:
-                        continue
-                    # 某些日中詞典（如 wty-ja-zh）將假名讀音寫在首行「詞【かな】」而留空 reading 欄，自動補提取
-                    if reading == term and gloss_list:
-                        rm = re.search(r"【([ぁ-んァ-ンー]+)】", gloss_list[0].splitlines()[0])
-                        if rm:
-                            reading = rm.group(1)
-                    batch.append(
-                        (dict_id, term, reading, pos, score, json.dumps(gloss_list, ensure_ascii=False))
-                    )
-                    total_terms += 1
-                    if len(batch) >= 5000:
+                cur = self._conn.cursor()
+                staging_name = f"{title}::__staging_{uuid.uuid4().hex[:8]}"
+                cur.execute("SAVEPOINT galanki_dict_import")
+                try:
+                    if has_source_col and has_lic_col:
+                        cur.execute(
+                            "INSERT INTO dictionaries (name, kind, revision, entry_count, priority, enabled, source_id, license) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                            (staging_name, kind, revision, 0, priority, keep_enabled, stable_source, final_license),
+                        )
+                    else:
+                        cur.execute(
+                            "INSERT INTO dictionaries (name, kind, revision, entry_count, priority, enabled) "
+                            "VALUES (?, ?, ?, ?, ?, ?)",
+                            (staging_name, kind, revision, 0, priority, keep_enabled),
+                        )
+                    dict_id = cur.lastrowid
+
+                    total_files = max(1, len(term_banks) + len(meta_banks))
+                    processed = 0
+                    total_terms = 0
+                    total_meta = 0
+                    batch: list[tuple[Any, ...]] = []
+
+                    for bank_name in term_banks:
+                        entries = json.loads(zf.read(bank_name).decode("utf-8"))
+                        if not isinstance(entries, list):
+                            raise ValueError(f"{bank_name} 格式錯誤（非陣列）。")
+                        for row in entries:
+                            if not isinstance(row, list) or len(row) < 6:
+                                continue
+                            term = str(row[0] or "").strip()
+                            reading = str(row[1] or "").strip() or term
+                            tags = str(row[2] or "")
+                            rules = str(row[3] or "")
+                            pos = ",".join(p for p in (rules, tags) if p)
+                            score = int(row[4] or 0) if isinstance(row[4], (int, float)) else 0
+                            raw_glosses = row[5]
+                            gloss_list: list[str] = []
+                            if isinstance(raw_glosses, list):
+                                for g in raw_glosses:
+                                    txt = re.sub(r"\n{2,}", "\n", _extract_yomitan_text(g)).strip()
+                                    if txt:
+                                        gloss_list.append(txt)
+                            else:
+                                txt = _extract_yomitan_text(raw_glosses).strip()
+                                if txt:
+                                    gloss_list.append(txt)
+
+                            if not term or not gloss_list:
+                                continue
+                            if reading == term and gloss_list:
+                                rm = re.search(r"【([ぁ-んァ-ンー]+)】", gloss_list[0].splitlines()[0])
+                                if rm:
+                                    reading = rm.group(1)
+                            batch.append(
+                                (dict_id, term, reading, pos, score, json.dumps(gloss_list, ensure_ascii=False))
+                            )
+                            total_terms += 1
+                            if len(batch) >= 5000:
+                                cur.executemany(
+                                    "INSERT INTO terms (dict_id, term, reading, pos, score, glosses_json) VALUES (?, ?, ?, ?, ?, ?)",
+                                    batch,
+                                )
+                                batch.clear()
+
+                        processed += 1
+                        if progress:
+                            progress(f"匯入詞條 {title} ({processed}/{total_files})", int(processed * 100 / total_files))
+
+                    if batch:
                         cur.executemany(
                             "INSERT INTO terms (dict_id, term, reading, pos, score, glosses_json) VALUES (?, ?, ?, ?, ?, ?)",
                             batch,
                         )
                         batch.clear()
 
-                processed += 1
-                if progress:
-                    progress(f"匯入詞條 {title} ({processed}/{total_files})", int(processed * 100 / total_files))
+                    meta_batch: list[tuple[Any, ...]] = []
+                    for bank_name in meta_banks:
+                        entries = json.loads(zf.read(bank_name).decode("utf-8"))
+                        if not isinstance(entries, list):
+                            raise ValueError(f"{bank_name} 格式錯誤（非陣列）。")
+                        for row in entries:
+                            if not isinstance(row, list) or len(row) < 3:
+                                continue
+                            term = str(row[0] or "").strip()
+                            mode = str(row[1] or "").strip()
+                            data = row[2]
+                            reading = ""
+                            if isinstance(data, dict):
+                                reading = str(data.get("reading") or "")
+                            if mode == "pitch" and isinstance(data, dict):
+                                positions = [
+                                    str(p.get("position"))
+                                    for p in data.get("pitches", [])
+                                    if isinstance(p, dict) and p.get("position") is not None
+                                ]
+                                if positions:
+                                    meta_batch.append(
+                                        (dict_id, term, reading, "pitch", json.dumps({"pitches": positions}))
+                                    )
+                                    total_meta += 1
+                            elif mode == "freq":
+                                freq_val = None
+                                if isinstance(data, int):
+                                    freq_val = data
+                                elif isinstance(data, dict):
+                                    fv = data.get("frequency", data.get("value"))
+                                    if isinstance(fv, dict):
+                                        fv = fv.get("value")
+                                    if isinstance(fv, int):
+                                        freq_val = fv
+                                if freq_val is not None:
+                                    meta_batch.append(
+                                        (dict_id, term, reading, "freq", json.dumps({"frequency": freq_val}))
+                                    )
+                                    total_meta += 1
+                            if len(meta_batch) >= 5000:
+                                cur.executemany(
+                                    "INSERT INTO term_meta (dict_id, term, reading, mode, data_json) VALUES (?, ?, ?, ?, ?)",
+                                    meta_batch,
+                                )
+                                meta_batch.clear()
 
-            if batch:
-                cur.executemany(
-                    "INSERT INTO terms (dict_id, term, reading, pos, score, glosses_json) VALUES (?, ?, ?, ?, ?, ?)",
-                    batch,
-                )
-                batch.clear()
+                        processed += 1
+                        if progress:
+                            progress(f"匯入音調/詞頻 {title} ({processed}/{total_files})", int(processed * 100 / total_files))
 
-            meta_batch: list[tuple[Any, ...]] = []
-            for bank_name in meta_banks:
-                entries = json.loads(zf.read(bank_name).decode("utf-8"))
-                for row in entries:
-                    if not isinstance(row, list) or len(row) < 3:
-                        continue
-                    term = str(row[0] or "").strip()
-                    mode = str(row[1] or "").strip()
-                    data = row[2]
-                    reading = ""
-                    if isinstance(data, dict):
-                        reading = str(data.get("reading") or "")
-                    if mode == "pitch" and isinstance(data, dict):
-                        positions = [
-                            str(p.get("position"))
-                            for p in data.get("pitches", [])
-                            if isinstance(p, dict) and p.get("position") is not None
-                        ]
-                        if positions:
-                            meta_batch.append(
-                                (dict_id, term, reading, "pitch", json.dumps({"pitches": positions}))
-                            )
-                            total_meta += 1
-                    elif mode == "freq":
-                        freq_val = None
-                        if isinstance(data, int):
-                            freq_val = data
-                        elif isinstance(data, dict):
-                            fv = data.get("frequency", data.get("value"))
-                            if isinstance(fv, dict):
-                                fv = fv.get("value")
-                            if isinstance(fv, int):
-                                freq_val = fv
-                        if freq_val is not None:
-                            meta_batch.append(
-                                (dict_id, term, reading, "freq", json.dumps({"frequency": freq_val}))
-                            )
-                            total_meta += 1
-                    if len(meta_batch) >= 5000:
+                    if meta_batch:
                         cur.executemany(
                             "INSERT INTO term_meta (dict_id, term, reading, mode, data_json) VALUES (?, ?, ?, ?, ?)",
                             meta_batch,
                         )
-                        meta_batch.clear()
 
-                processed += 1
-                if progress:
-                    progress(f"匯入音調/詞頻 {title} ({processed}/{total_files})", int(processed * 100 / total_files))
+                    final_count = total_terms if total_terms > 0 else total_meta
+                    if final_count == 0:
+                        raise ValueError("此詞典壓縮檔解析後沒有任何可用詞條，已取消切換並保留原版本。")
 
-            if meta_batch:
-                cur.executemany(
-                    "INSERT INTO term_meta (dict_id, term, reading, mode, data_json) VALUES (?, ?, ?, ?, ?)",
-                    meta_batch,
-                )
+                    # 新版本匯入驗證成功後，才移除舊版本並原子切換為正式名稱
+                    if old_id is not None:
+                        cur.execute("DELETE FROM terms WHERE dict_id = ?", (old_id,))
+                        cur.execute("DELETE FROM term_meta WHERE dict_id = ?", (old_id,))
+                        cur.execute("DELETE FROM dictionaries WHERE id = ?", (old_id,))
+                    # 若另有同名舊紀錄（例如不同版本標題相同）一併清理
+                    dup = cur.execute(
+                        "SELECT id FROM dictionaries WHERE name = ? AND id != ?",
+                        (title, dict_id),
+                    ).fetchone()
+                    if dup is not None:
+                        cur.execute("DELETE FROM terms WHERE dict_id = ?", (dup["id"],))
+                        cur.execute("DELETE FROM term_meta WHERE dict_id = ?", (dup["id"],))
+                        cur.execute("DELETE FROM dictionaries WHERE id = ?", (dup["id"],))
 
-            final_count = total_terms if total_terms > 0 else total_meta
-            cur.execute("UPDATE dictionaries SET entry_count = ? WHERE id = ?", (final_count, dict_id))
-            self._conn.commit()
+                    cur.execute(
+                        "UPDATE dictionaries SET name = ?, entry_count = ? WHERE id = ?",
+                        (title, final_count, dict_id),
+                    )
+                    cur.execute("RELEASE SAVEPOINT galanki_dict_import")
+                    self._conn.commit()
+                except Exception:
+                    cur.execute("ROLLBACK TO SAVEPOINT galanki_dict_import")
+                    cur.execute("RELEASE SAVEPOINT galanki_dict_import")
+                    self._conn.commit()
+                    raise
 
-            return {"id": dict_id, "name": title, "kind": kind, "entry_count": final_count}
+                return {
+                    "id": dict_id,
+                    "name": title,
+                    "kind": kind,
+                    "revision": revision,
+                    "source_id": stable_source,
+                    "entry_count": final_count,
+                }
 
     def download_and_import_free_dictionary(
         self,
@@ -921,6 +1442,8 @@ class DictionaryEngine:
                     kind_override=spec["kind"],
                     progress=import_cb,
                     priority_override=spec.get("priority"),
+                    source_id=spec["id"],
+                    license_text=spec.get("license"),
                 )
 
     def download_recommended_bundle(
@@ -1012,24 +1535,79 @@ class DictionaryEngine:
                 """,
                 (term,),
             ).fetchall()
-        pitches: list[str] = []
-        best_freq: int | None = None
+
+        exact_pitches: list[str] = []
+        fallback_pitches: list[str] = []
+        exact_freq: int | None = None
+        fallback_freq: int | None = None
+        has_other_reading_freq = False
+        has_other_reading_pitch = False
+
         for r in rows:
-            if r["reading"] and reading and r["reading"] != reading:
-                continue
+            m_rd = str(r["reading"] or "")
             raw_data = r["data_json"]
             if not raw_data:
                 continue
             data = json.loads(raw_data)
             if r["mode"] == "pitch":
-                for p in data.get("pitches", []):
-                    if p not in pitches:
-                        pitches.append(p)
+                if reading and m_rd:
+                    if m_rd != reading:
+                        has_other_reading_pitch = True
+                        continue
+                    for p in data.get("pitches", []):
+                        if p not in exact_pitches:
+                            exact_pitches.append(p)
+                else:
+                    for p in data.get("pitches", []):
+                        if p not in fallback_pitches:
+                            fallback_pitches.append(p)
             elif r["mode"] == "freq":
                 val = data.get("frequency")
-                if isinstance(val, int) and (best_freq is None or val < best_freq):
-                    best_freq = val
+                if not isinstance(val, int):
+                    continue
+                if reading and m_rd:
+                    if m_rd != reading:
+                        has_other_reading_freq = True
+                        continue
+                    if exact_freq is None or val < exact_freq:
+                        exact_freq = val
+                else:
+                    if fallback_freq is None or val < fallback_freq:
+                        fallback_freq = val
+
+        pitches = exact_pitches if exact_pitches else ([] if has_other_reading_pitch else fallback_pitches)
+        best_freq = exact_freq if exact_freq is not None else (None if has_other_reading_freq else fallback_freq)
         return pitches, best_freq
+
+    def batch_has_terms(self, candidates: list[str] | set[str]) -> set[str]:
+        """單次 SQLite 查詢確認一批候選語塊是否存在於啟用詞典中（供語塊匹配高速預篩）。"""
+        unique = [c for c in set(candidates) if c]
+        if not unique:
+            return set()
+        found: set[str] = set()
+        chunk_size = 200
+        for i in range(0, len(unique), chunk_size):
+            chunk = unique[i : i + chunk_size]
+            ph = ",".join("?" for _ in chunk)
+            with self._lock:
+                rows = self._conn.execute(
+                    f"""
+                    SELECT DISTINCT t.term AS hit
+                    FROM terms t
+                    JOIN dictionaries d ON d.id = t.dict_id
+                    WHERE d.enabled = 1 AND t.term IN ({ph})
+                    UNION
+                    SELECT DISTINCT t.reading AS hit
+                    FROM terms t
+                    JOIN dictionaries d ON d.id = t.dict_id
+                    WHERE d.enabled = 1 AND t.reading IN ({ph})
+                    """,
+                    chunk + chunk,
+                ).fetchall()
+            for r in rows:
+                if r["hit"]:
+                    found.add(str(r["hit"]))
+        return found
 
     def batch_lookup_frequencies(self, terms: list[str] | set[str]) -> dict[str, int]:
         """批次查詢多個詞條的最高優先（數值最小）詞頻排名，供 1T 黃金句礦場高速排序。"""
@@ -1066,12 +1644,16 @@ class DictionaryEngine:
         if not pos_hint or not entry_pos:
             return False
         ep = entry_pos.lower()
+        if pos_hint == "代名詞":
+            return any(k in ep for k in ("pron", "pn", "代"))
+        if pos_hint == "接尾":
+            return any(k in ep for k in ("suf", "接尾"))
         if pos_hint == "動詞":
             return any(k in ep for k in ("v1", "v5", "vs", "vk", "verb", "動詞", "一段", "五段", "サ変", "カ変")) or ep == "v"
         if pos_hint == "形容詞":
             return any(k in ep for k in ("adj-i", "形容詞", "i-adj"))
         if pos_hint == "名詞":
-            return any(k in ep for k in ("n", "名", "pron"))
+            return any(k in ep for k in ("n", "名", "pron", "pn"))
         if pos_hint == "副詞":
             return any(k in ep for k in ("adv", "副"))
         if pos_hint == "感動詞":
@@ -1079,6 +1661,62 @@ class DictionaryEngine:
         if pos_hint == "連体詞":
             return any(k in ep for k in ("adj-pn", "adj_noun", "連体"))
         return False
+
+    def _entry_pos_family(self, entry_pos: str) -> str:
+        ep = (entry_pos or "").lower()
+        if re.search(r"(?:^|[\s,])(?:pron|pn)(?:$|[\s,])", ep) or "代" in ep:
+            return "pron"
+        if re.search(r"(?:^|[\s,])(?:suf|n-suf)(?:$|[\s,])", ep) or "接尾" in ep:
+            return "suf"
+        if re.search(r"(?:^|[\s,])(?:adv)(?:$|[\s,])", ep) or "副" in ep:
+            return "adv"
+        if any(k in ep for k in ("v1", "v5", "vs", "vk", "verb", "動")):
+            return "verb"
+        if any(k in ep for k in ("adj", "形")):
+            return "adj"
+        if re.search(r"(?:^|[\s,])n(?:$|[\s,])", ep) or "名" in ep:
+            return "noun"
+        return ""
+
+    def _order_group_entries(self, grp_entries: list[DictEntry], pos_hint: str = "") -> list[DictEntry]:
+        """在同一 (原形, 讀音) 內保留現代常用詞性與非古語義項在前，參考 JMdict 義項主序調校 Wiktionary 同分條目。"""
+        if len(grp_entries) <= 1:
+            return grp_entries
+
+        # 偵測同組 JMdict 最高分首義的詞性家族（例如 君(きみ) 首義是 1 pn fam 代名詞，而非 2 n 君王）
+        jmdict_top = sorted(
+            (e for e in grp_entries if "jmdict" in e.dict_name.lower() and "forms" not in e.pos.lower()),
+            key=lambda e: e.score,
+            reverse=True,
+        )
+        consensus_family = self._entry_pos_family(jmdict_top[0].pos) if jmdict_top else ""
+
+        def _sort_key(idx_e: tuple[int, DictEntry]) -> tuple[int, int, int, int, int, int]:
+            idx, e = idx_e
+            is_spoken = 0 if "口語核心詞庫" in e.dict_name else 1
+            is_stub = 1 if _is_inflection_stub_entries([e]) else 0
+            reg = _extract_register_tag(e.pos)
+            is_archaic = 1 if any(t in reg for t in ("arch", "obs", "hist")) else 0
+            pos_match = 0 if (pos_hint and self._pos_hint_matches(e.pos, pos_hint)) else 1
+            # 僅當未明確指定特定子詞性、或 JMdict 主詞性與之相容時，以 JMdict 首義詞性為現代語序先驗
+            fam = self._entry_pos_family(e.pos)
+            fam_match = 0 if (consensus_family and fam == consensus_family) else 1
+            return (is_spoken, is_stub, is_archaic, pos_match, fam_match, idx)
+
+        return [e for _, e in sorted(enumerate(grp_entries), key=_sort_key)]
+
+    def _extract_alt_redirect_targets(self, entries: list[DictEntry]) -> list[str]:
+        """從 Wiktionary non-lemma 轉址條目（如 さすがalt-of / 流石alternative）抽出目標詞頭。"""
+        targets: list[str] = []
+        for e in entries:
+            if "non-lemma" not in e.pos.lower():
+                continue
+            for g in e.glosses[:2]:
+                for ln in g.splitlines():
+                    m = re.match(r"^([\u3040-\u9fff々ー]{2,10})\s*(?:alt-of|alternative)\b", ln.strip(), re.IGNORECASE)
+                    if m and m.group(1) not in targets:
+                        targets.append(m.group(1))
+        return targets
 
     def _freq_bonus(self, freq: int | None) -> int:
         if freq is None:
@@ -1102,17 +1740,18 @@ class DictionaryEngine:
         reading_hint: str = "",
         lemma_hint: str = "",
     ) -> LookupMatch | None:
-        """多候選詞頻＋詞性＋讀音聯合消歧查詢（徹底解決「わかった誤判分かつ」等冷門詞覆蓋高頻詞問題！）。"""
+        """多候選詞頻＋詞性＋讀音聯合消歧查詢（含假名/通常假名表記融合、純片假名保護與現代詞性排序）。"""
         if not surface:
             return None
 
         candidates = list(deinflect(surface))
-        # 若 Janome 形態素解析器已給出明確原型（如 わかっ+た -> わかる），優先加入候選清單
         if lemma_hint and not any(c.term == lemma_hint for c in candidates):
             from galgame_anki.core.deinflector import DeinflectCandidate
 
             candidates.insert(0, DeinflectCandidate(term=lemma_hint, rules=RULE_NONE, reasons=()))
 
+        is_pure_kata = is_katakana_loanword(surface)
+        is_pure_hira = bool(_HIRAGANA_ONLY_RE.match(surface))
         scored_matches: list[tuple[int, LookupMatch]] = []
         seen_keys: set[tuple[str, str]] = set()
 
@@ -1128,7 +1767,6 @@ class DictionaryEngine:
             if not matched_entries:
                 continue
 
-            # 若有讀音提示或詞性提示，在同一候選內優先把最吻合的條目排到前面（且保留口語核心詞庫最高優先）
             if reading_hint or pos_hint:
                 matched_entries.sort(
                     key=lambda e: (
@@ -1138,20 +1776,26 @@ class DictionaryEngine:
                     )
                 )
 
-            # 按 (term, reading) 分組，讓同讀音不同漢字（如 わかる -> 分かる vs わかつ -> 分かつ）各自獨立競爭！
+            # 先為同詞頭但缺假名讀音的條目（如 wty-ja-ja 気を遣う reading=気を遣う）補對齊標準假名讀音
+            canon_kana_rd: dict[str, str] = {}
+            for e in matched_entries:
+                if e.reading and not _HAS_KANJI_RE.search(e.reading) and e.term not in canon_kana_rd:
+                    canon_kana_rd[e.term] = e.reading
+
             grouped: dict[tuple[str, str], list[DictEntry]] = {}
             for e in matched_entries:
                 rd = e.reading
                 if _HAS_KANJI_RE.search(e.term) and (not rd or _HAS_KANJI_RE.search(rd)):
-                    rd = reading_hint or rd
+                    rd = reading_hint or canon_kana_rd.get(e.term) or rd
                 key = (e.term, rd)
                 grouped.setdefault(key, []).append(e)
 
-            for (lemma, reading), grp_entries in list(grouped.items())[:4]:
+            for (lemma, reading), grp_entries in list(grouped.items())[:6]:
                 if (lemma, reading) in seen_keys:
                     continue
                 seen_keys.add((lemma, reading))
 
+                ordered_entries = self._order_group_entries(grp_entries, pos_hint=pos_hint)
                 pitches, freq = self._query_meta(lemma, reading)
                 if freq is None and reading and reading != lemma:
                     p2, f2 = self._query_meta(reading, reading)
@@ -1159,10 +1803,10 @@ class DictionaryEngine:
                         pitches = p2
                     freq = f2
 
-                bi = [e for e in grp_entries if e.dict_kind == "bilingual"]
-                mono = [e for e in grp_entries if e.dict_kind == "monolingual"]
+                bi = [e for e in ordered_entries if e.dict_kind == "bilingual"]
+                mono = [e for e in ordered_entries if e.dict_kind == "monolingual"]
 
-                for e in grp_entries:
+                for e in ordered_entries:
                     e.pitches = pitches
                     e.frequency = freq
 
@@ -1177,25 +1821,33 @@ class DictionaryEngine:
                     frequency=freq,
                 )
 
-                # 計算多維度語言學消歧分數（徹底告別「撞到第一個冷門詞就回傳」！）
                 score = self._freq_bonus(freq)
-                is_stub = cand.rules == RULE_NONE and _is_inflection_stub_entries(grp_entries)
+                is_stub = cand.rules == RULE_NONE and _is_inflection_stub_entries(ordered_entries)
                 if is_stub:
                     score -= 5500
                 elif cand.rules == RULE_NONE and lemma == surface:
                     score += 1200
 
+                # 純片假名詞（如 ガチ / ワンチャン）優先原詞本身，避免被罕見片假名音讀漢字（如 月=ガチ）搶占
+                if is_pure_kata and cand.rules == RULE_NONE:
+                    if lemma == surface and not is_stub:
+                        score += 3600
+                    elif _HAS_KANJI_RE.search(lemma):
+                        score -= 4800
+
                 if lemma_hint and (lemma == lemma_hint or reading == lemma_hint):
                     score += 8000
                 if reading_hint and reading == reading_hint:
                     score += 3200
-                if pos_hint and any(self._pos_hint_matches(e.pos, pos_hint) for e in grp_entries):
+                if pos_hint and any(self._pos_hint_matches(e.pos, pos_hint) for e in ordered_entries):
                     score += 2400
-                if any("口語核心詞庫" in e.dict_name for e in grp_entries):
+                if any("口語核心詞庫" in e.dict_name for e in ordered_entries):
                     score += 1800
-                if bi:
-                    score += 400
-                # 還原步數越少越自然（避免過度多層誤還原）
+                has_real_bi = bool(bi) and not _is_inflection_stub_entries(bi)
+                if has_real_bi:
+                    score += 700
+                    if any(classify_entry_language(e) == "zh" and not _is_inflection_stub_entries([e]) for e in bi):
+                        score += 500
                 score -= len(cand.reasons) * 180
 
                 scored_matches.append((score, match_obj))
@@ -1205,15 +1857,66 @@ class DictionaryEngine:
 
         scored_matches.sort(key=lambda pair: pair[0], reverse=True)
         best = scored_matches[0][1]
-        # 保留最多 3 個不同原形的備選詞（如 あった -> ある / 会う / 合う），介面可 1 點切換！
+
+        # 假名／通常假名表記補強（如 さすが -> 融合 流石(さすが)，さすがに -> 融合 流石に(さすがに) 與 alt-of 目標）
+        if is_pure_hira:
+            best_by_lang = best.senses_by_language(max_per_lang=2, convert_tw=False)
+            if not best_by_lang["zh"] or not best_by_lang["en"]:
+                existing_bi_keys = {(e.dict_name, e.term, e.reading, e.pos) for e in best.bilingual_entries}
+                existing_mn_keys = {(e.dict_name, e.term, e.reading, e.pos) for e in best.monolingual_entries}
+                for _, cand_m in scored_matches[1:]:
+                    if cand_m.reading != best.reading:
+                        continue
+                    for e in cand_m.bilingual_entries:
+                        if _is_inflection_stub_entries([e]):
+                            continue
+                        ek = (e.dict_name, e.term, e.reading, e.pos)
+                        if ek not in existing_bi_keys:
+                            best.bilingual_entries.append(e)
+                            existing_bi_keys.add(ek)
+                    if not best.monolingual_entries:
+                        for e in cand_m.monolingual_entries:
+                            if _is_inflection_stub_entries([e]):
+                                continue
+                            ek = (e.dict_name, e.term, e.reading, e.pos)
+                            if ek not in existing_mn_keys:
+                                best.monolingual_entries.append(e)
+                                existing_mn_keys.add(ek)
+                best.bilingual_entries = self._order_group_entries(best.bilingual_entries, pos_hint=pos_hint)
+
+            # 若仍無中文義項，檢查 non-lemma 轉址目標（如 さすがに -> 流石 / さすが）
+            if not best.senses_by_language(max_per_lang=1, convert_tw=False)["zh"]:
+                targets = self._extract_alt_redirect_targets(best.bilingual_entries)
+                for tgt in targets[:2]:
+                    for re_entry in self._query_exact(tgt):
+                        if re_entry.dict_kind != "bilingual" or classify_entry_language(re_entry) != "zh":
+                            continue
+                        if _is_inflection_stub_entries([re_entry]):
+                            continue
+                        if re_entry.reading and not (
+                            re_entry.reading == best.reading
+                            or best.reading.startswith(re_entry.reading)
+                        ):
+                            continue
+                        best.bilingual_entries.append(re_entry)
+                best.bilingual_entries = self._order_group_entries(best.bilingual_entries, pos_hint=pos_hint)
+
+        # 保留最多 3 個不同原形且非空存根的備選詞
         alts: list[LookupMatch] = []
         seen_alt_lemmas = {best.lemma}
         for _, cand_match in scored_matches[1:]:
-            if cand_match.lemma not in seen_alt_lemmas and cand_match.all_entries:
-                seen_alt_lemmas.add(cand_match.lemma)
-                alts.append(cand_match)
-                if len(alts) >= 3:
-                    break
+            if cand_match.lemma in seen_alt_lemmas or not cand_match.all_entries:
+                continue
+            if _is_inflection_stub_entries(cand_match.all_entries):
+                continue
+            # 若剛把同讀音 uk 漢字（如 流石）併入假名主結果，就不必再當成無關備選重複列出
+            if is_pure_hira and cand_match.reading == best.reading and cand_match.bilingual_entries:
+                if any(e in best.bilingual_entries for e in cand_match.bilingual_entries):
+                    continue
+            seen_alt_lemmas.add(cand_match.lemma)
+            alts.append(cand_match)
+            if len(alts) >= 3:
+                break
         best.alt_matches = alts
         return best
 

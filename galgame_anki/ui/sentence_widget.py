@@ -3,7 +3,15 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QSize, Qt, QTimer, Signal
-from PySide6.QtWidgets import QLayout, QLayoutItem, QPushButton, QSizePolicy, QWidget
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import (
+    QGraphicsDropShadowEffect,
+    QLayout,
+    QLayoutItem,
+    QPushButton,
+    QSizePolicy,
+    QWidget,
+)
 
 from galgame_anki.core.tokenizer import (
     Token,
@@ -15,14 +23,24 @@ from galgame_anki.ui.theme import get_palette
 
 
 class FlowLayout(QLayout):
-    """Qt 標準自動換行流式佈局，讓日文台詞自然橫排換行且每個詞都能獨立點擊。"""
+    """Qt 標準自動換行流式佈局，讓日文台詞自然橫排換行且每個詞都能獨立點擊，並支援逐行左對齊／居中對齊。"""
 
     def __init__(self, parent: QWidget | None = None, margin: int = 2, h_spacing: int = 1, v_spacing: int = 4) -> None:
         super().__init__(parent)
         self._items: list[QLayoutItem] = []
         self._h_spacing = h_spacing
         self._v_spacing = v_spacing
+        self._horizontal_alignment: Qt.AlignmentFlag = Qt.AlignmentFlag.AlignLeft
         self.setContentsMargins(margin, margin, margin, margin)
+
+    def set_horizontal_alignment(self, alignment: Qt.AlignmentFlag) -> None:
+        if self._horizontal_alignment != alignment:
+            self._horizontal_alignment = alignment
+            self.invalidate()
+            self.activate()
+
+    def horizontal_alignment(self) -> Qt.AlignmentFlag:
+        return self._horizontal_alignment
 
     def addItem(self, item: QLayoutItem) -> None:
         self._items.append(item)
@@ -67,26 +85,40 @@ class FlowLayout(QLayout):
     def _do_layout(self, rect: QRect, test_only: bool) -> int:
         m = self.contentsMargins()
         effective = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom())
-        x = effective.x()
-        y = effective.y()
+        lines: list[tuple[list[tuple[QLayoutItem, QSize]], int, int]] = []
+        current_line: list[tuple[QLayoutItem, QSize]] = []
+        line_width = 0
         line_height = 0
 
         for item in self._items:
             hint = item.sizeHint()
-            next_x = x + hint.width() + self._h_spacing
-            if next_x - self._h_spacing > effective.right() and line_height > 0:
-                x = effective.x()
-                y += line_height + self._v_spacing
-                next_x = x + hint.width() + self._h_spacing
-                line_height = 0
+            candidate_w = hint.width() if not current_line else line_width + self._h_spacing + hint.width()
+            if current_line and candidate_w > effective.width():
+                lines.append((current_line, line_width, line_height))
+                current_line = [(item, hint)]
+                line_width = hint.width()
+                line_height = hint.height()
+            else:
+                current_line.append((item, hint))
+                line_width = candidate_w
+                line_height = max(line_height, hint.height())
 
+        if current_line:
+            lines.append((current_line, line_width, line_height))
+
+        y = effective.y()
+        center = bool(self._horizontal_alignment & Qt.AlignmentFlag.AlignHCenter)
+        for idx, (line_items, lw, lh) in enumerate(lines):
+            if idx > 0:
+                y += self._v_spacing
             if not test_only:
-                item.setGeometry(QRect(QPoint(x, y), hint))
+                x = effective.x() + max(0, (effective.width() - lw) // 2) if center else effective.x()
+                for item, hint in line_items:
+                    item.setGeometry(QRect(QPoint(x, y), hint))
+                    x += hint.width() + self._h_spacing
+            y += lh
 
-            x = next_x
-            line_height = max(line_height, hint.height())
-
-        return y + line_height - rect.y() + m.bottom()
+        return y - rect.y() + m.bottom()
 
 
 class InteractiveSentenceWidget(QWidget):
@@ -101,6 +133,8 @@ class InteractiveSentenceWidget(QWidget):
         self._font_size = font_size
         self._show_furigana = False
         self._theme_name = theme_name
+        self._cinema_shadow = False
+        self._text_align = "left"
         self._hover_enabled = False
         self._selected_index: int = -1
         self._buttons: list[tuple[QPushButton, Token]] = []
@@ -118,16 +152,37 @@ class InteractiveSentenceWidget(QWidget):
         self.setStyleSheet("background: transparent;")
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding)
 
+    @property
+    def text_align(self) -> str:
+        return self._text_align
+
+    def set_text_align(self, align: str) -> None:
+        normalized = "center" if align == "center" else "left"
+        self._text_align = normalized
+        self._flow.set_horizontal_alignment(
+            Qt.AlignmentFlag.AlignHCenter if normalized == "center" else Qt.AlignmentFlag.AlignLeft
+        )
+        self.updateGeometry()
+        self.update()
+
     def set_hover_lookup_enabled(self, enabled: bool) -> None:
         self._hover_enabled = enabled
         if not enabled:
             self._hover_timer.stop()
 
-    def set_display_options(self, font_size: int, show_furigana: bool, theme_name: str | None = None) -> None:
+    def set_display_options(
+        self,
+        font_size: int,
+        show_furigana: bool,
+        theme_name: str | None = None,
+        cinema_shadow: bool | None = None,
+    ) -> None:
         self._font_size = font_size
         self._show_furigana = show_furigana
         if theme_name:
             self._theme_name = theme_name
+        if cinema_shadow is not None:
+            self._cinema_shadow = bool(cinema_shadow)
         if self._sentence is not None:
             self.set_sentence(self._sentence)
 
@@ -173,11 +228,18 @@ class InteractiveSentenceWidget(QWidget):
             )
             btn.setEnabled(not tok.is_punctuation)
             btn.setStyleSheet(self._token_style(tok, selected=False))
+            if self._cinema_shadow:
+                shadow = QGraphicsDropShadowEffect(btn)
+                shadow.setBlurRadius(9.0)
+                shadow.setOffset(0.0, 1.5)
+                shadow.setColor(QColor(0, 0, 0, 250))
+                btn.setGraphicsEffect(shadow)
             if not tok.is_punctuation:
                 btn.clicked.connect(lambda _checked=False, i=idx, t=tok, b=btn: self._on_click(i, t, b))
                 btn.installEventFilter(self)
                 self._btn_to_token[btn] = tok
             self._flow.addWidget(btn)
+            btn.show()  # 讓捲動區立即取得新詞元的尺寸。
             self._buttons.append((btn, tok))
 
         self.updateGeometry()
@@ -213,15 +275,16 @@ class InteractiveSentenceWidget(QWidget):
         p = get_palette(self._theme_name)
 
         if tok.is_punctuation:
+            punct_color = "#f8fafc" if self._cinema_shadow else p.text_muted
             return (
                 f"QPushButton {{ background: transparent; border: none; "
-                f"color: {p.text_muted}; font-size: {fs}px; padding: 1px 0px; }}"
+                f"color: {punct_color}; font-size: {fs}px; padding: 1px 0px; }}"
             )
 
         bg = "transparent"
         border_bottom = "2px solid transparent"
-        color = p.text_primary
-        weight = "500"
+        color = "#ffffff" if self._cinema_shadow else p.text_primary
+        weight = "600" if self._cinema_shadow else "500"
 
         if selected:
             bg = p.token_selected_bg
@@ -229,21 +292,22 @@ class InteractiveSentenceWidget(QWidget):
             color = p.token_selected_fg
             weight = "700"
         elif tok.is_1t_candidate:
-            bg = p.token_1t_bg
-            border_bottom = f"2px solid {p.token_1t_line}"
-            color = p.token_1t_fg
+            bg = "rgba(250, 204, 21, 0.22)" if self._cinema_shadow else p.token_1t_bg
+            border_bottom = f"2px solid {'#fde047' if self._cinema_shadow else p.token_1t_line}"
+            color = "#fef08a" if self._cinema_shadow else p.token_1t_fg
             weight = "700"
         elif tok.is_function_word:
-            color = p.text_muted
+            color = "#e2e8f0" if self._cinema_shadow else p.text_muted
         elif not tok.is_known and tok.has_dict_entry:
-            border_bottom = f"2px dotted {p.border_accent}"
-            color = p.text_primary
+            border_bottom = f"2px dotted {'rgba(244, 114, 182, 0.85)' if self._cinema_shadow else p.border_accent}"
+            color = "#ffffff" if self._cinema_shadow else p.text_primary
         elif tok.is_known:
-            color = p.text_secondary
+            color = "#f1f5f9" if self._cinema_shadow else p.text_secondary
 
+        hover_bg = "rgba(244, 114, 182, 0.30)" if self._cinema_shadow else p.token_hover_bg
         return (
             f"QPushButton {{ background: {bg}; border: none; border-bottom: {border_bottom}; "
             f"border-radius: 6px; color: {color}; font-size: {fs}px; font-weight: {weight}; "
             f"padding: 1px 3px; }}"
-            f"QPushButton:hover {{ background: {p.token_hover_bg}; color: {p.accent_pink}; }}"
+            f"QPushButton:hover {{ background: {hover_bg}; color: #ffffff; }}"
         )
