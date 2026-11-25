@@ -100,6 +100,58 @@ class SentenceStore:
         latest.audio_source = ""
         return latest
 
+    def peek_previous_record(self, record_id: int) -> SentenceRecord | None:
+        """取得時間順序上緊鄰 `record_id` 之前的上一句台詞（供 mpv / Galgame 多句合併使用）。"""
+        for idx, rec in enumerate(self._records):
+            if rec.record_id == record_id:
+                if idx + 1 < len(self._records):
+                    return self._records[idx + 1]
+                return None
+        return None
+
+    def merge_previous_into_record(
+        self,
+        record_id: int,
+        merged_tokenized: TokenizedSentence,
+        grammar_analysis: SentenceGrammarAnalysis | None = None,
+    ) -> SentenceRecord | None:
+        """將上一句與指定句子合併為完整一句，同時自動擴展 mpv 時間軸 [sub_start, sub_end]。"""
+        target_idx = -1
+        for idx, rec in enumerate(self._records):
+            if rec.record_id == record_id:
+                target_idx = idx
+                break
+        if target_idx < 0 or target_idx + 1 >= len(self._records):
+            return None
+
+        cur = self._records[target_idx]
+        prev = self._records[target_idx + 1]
+
+        cur.raw_text = merged_tokenized.raw
+        cur.tokenized = merged_tokenized
+        cur.grammar_analysis = grammar_analysis
+        cur.timestamp = min(prev.timestamp, cur.timestamp)
+        if prev.sub_start is not None and cur.sub_start is not None:
+            cur.sub_start = min(prev.sub_start, cur.sub_start)
+        elif prev.sub_start is not None:
+            cur.sub_start = prev.sub_start
+        if prev.sub_end is not None and cur.sub_end is not None:
+            cur.sub_end = max(prev.sub_end, cur.sub_end)
+        elif prev.sub_end is not None:
+            cur.sub_end = prev.sub_end
+        if not cur.video_path and prev.video_path:
+            cur.video_path = prev.video_path
+        if cur.screenshot_clip is None and prev.screenshot_clip is not None:
+            cur.screenshot_clip = prev.screenshot_clip
+        cur.audio_clip = None
+        cur.audio_source = ""
+        cur.sentence_translation = ""
+        cur.pack_translation = ""
+
+        # 移除已被吸收的上一句
+        del self._records[target_idx + 1]
+        return cur
+
     def all_records(self) -> list[SentenceRecord]:
         return list(self._records)
 

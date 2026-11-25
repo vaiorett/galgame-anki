@@ -25,6 +25,7 @@ from galgame_anki.core.grammar_engine import (
     explain_pos_friendly,
 )
 from galgame_anki.core.tokenizer import Token
+from galgame_anki.ui.pitch_widget import PitchGraphWidget
 from galgame_anki.ui.theme import get_palette
 
 
@@ -142,7 +143,7 @@ class LookupDetailPanel(QFrame):
         top.addStretch()
 
         self.audio_btn = QPushButton("🔊 試聽")
-        self.audio_btn.setToolTip("試聽這句台詞從遊戲／影片錄下的原聲語音 (Ctrl+P)")
+        self.audio_btn.setToolTip("試聽這句台詞的原聲語音 (Ctrl+P)")
         self.audio_btn.clicked.connect(self.audio_preview_requested.emit)
         top.addWidget(self.audio_btn)
 
@@ -160,6 +161,12 @@ class LookupDetailPanel(QFrame):
         top.addWidget(self.mine_btn)
 
         layout.addLayout(top)
+
+        self.pitch_widget = PitchGraphWidget(
+            compact=True,
+            dark_mode=(self._theme_name == "starlight"),
+        )
+        layout.addWidget(self.pitch_widget)
 
         self.trace_label = QLabel("")
         self.trace_label.setObjectName("MutedLabel")
@@ -213,6 +220,7 @@ class LookupDetailPanel(QFrame):
         self.reading_label.setStyleSheet(
             f"font-size: 14px; color: {p.accent_lilac}; font-weight: 600; background: transparent;"
         )
+        self.pitch_widget.set_dark_mode(self._theme_name == "starlight")
 
     def _emit_mine(self) -> None:
         if self._current_token is not None:
@@ -300,6 +308,11 @@ class LookupDetailPanel(QFrame):
         elif token.is_1t_candidate:
             meta_parts.append("★ 1T 推薦")
         self.meta_label.setText(" · ".join(meta_parts))
+        self.pitch_widget.set_pitch(
+            reading=reading or lemma,
+            pitches=(match.pitches if match else []),
+            dark_mode=(self._theme_name == "starlight"),
+        )
 
         trace_parts: list[str] = []
         if particle_info is not None:
@@ -417,6 +430,12 @@ class OverlayLookupPopup(QFrame):
         top.addWidget(close_btn)
         layout.addLayout(top)
 
+        self.pitch_widget = PitchGraphWidget(
+            compact=True,
+            dark_mode=(self._theme_name == "starlight"),
+        )
+        layout.addWidget(self.pitch_widget)
+
         self.reason_label = QLabel("")
         self.reason_label.setWordWrap(True)
         layout.addWidget(self.reason_label)
@@ -494,6 +513,7 @@ class OverlayLookupPopup(QFrame):
         self.def_label.setStyleSheet(
             f"font-size: 13.5px; line-height: 1.55; color: {p.text_primary}; background: transparent; padding: 2px;"
         )
+        self.pitch_widget.set_dark_mode(self._theme_name == "starlight")
 
     def _on_mine(self) -> None:
         if self._token is not None:
@@ -554,6 +574,11 @@ class OverlayLookupPopup(QFrame):
         pitch_txt = f" [{'/'.join(match.pitches[:2])}]" if (match and match.pitches) else ""
         freq_txt = f" {_frequency_hint(match.frequency)}" if (match and match.frequency) else ""
         self.reading_label.setText(f"{reading}{pitch_txt}{freq_txt}")
+        self.pitch_widget.set_pitch(
+            reading=reading or lemma,
+            pitches=(match.pitches if match else []),
+            dark_mode=(self._theme_name == "starlight"),
+        )
 
         meta_lines: list[str] = []
         if particle_info is not None:

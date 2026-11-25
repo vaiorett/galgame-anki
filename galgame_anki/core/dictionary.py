@@ -875,6 +875,36 @@ class DictionaryEngine:
                     best_freq = val
         return pitches, best_freq
 
+    def batch_lookup_frequencies(self, terms: list[str] | set[str]) -> dict[str, int]:
+        """批次查詢多個詞條的最高優先（數值最小）詞頻排名，供 1T 黃金句礦場高速排序。"""
+        unique = [t for t in set(terms) if t]
+        if not unique:
+            return {}
+        out: dict[str, int] = {}
+        chunk_size = 400
+        for i in range(0, len(unique), chunk_size):
+            chunk = unique[i : i + chunk_size]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = self._conn.execute(
+                f"""
+                SELECT m.term, m.data_json
+                FROM term_meta m
+                JOIN dictionaries d ON d.id = m.dict_id
+                WHERE d.enabled = 1 AND m.mode = 'freq' AND m.term IN ({placeholders})
+                """,
+                chunk,
+            ).fetchall()
+            for r in rows:
+                try:
+                    val = json.loads(r["data_json"]).get("frequency")
+                except (ValueError, TypeError):
+                    continue
+                if isinstance(val, int):
+                    term = str(r["term"])
+                    if term not in out or val < out[term]:
+                        out[term] = val
+        return out
+
     def _pos_hint_matches(self, entry_pos: str, pos_hint: str) -> bool:
         if not pos_hint or not entry_pos:
             return False

@@ -65,6 +65,7 @@ class OverlayWindow(QWidget):
     translate_requested = Signal(object)             # SentenceRecord
     prev_requested = Signal()
     next_requested = Signal()
+    merge_prev_requested = Signal()
     ocr_requested = Signal()
     audio_preview_requested = Signal()
     visibility_changed = Signal(bool)
@@ -311,6 +312,12 @@ class OverlayWindow(QWidget):
         self.next_btn.setToolTip("下一句")
         self.next_btn.clicked.connect(self.next_requested.emit)
         bar.addWidget(self.next_btn)
+
+        self.merge_btn = QPushButton("➕")
+        self.merge_btn.setFixedSize(24, 21)
+        self.merge_btn.setToolTip("合併上一句（當動畫／遊戲將完整一句拆成兩條字幕時，連同時間軸原聲一併合併）")
+        self.merge_btn.clicked.connect(self.merge_prev_requested.emit)
+        bar.addWidget(self.merge_btn)
 
         self.ocr_btn = QPushButton("📷")
         self.ocr_btn.setFixedSize(26, 21)

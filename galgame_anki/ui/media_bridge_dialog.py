@@ -1,4 +1,4 @@
-"""🎬 mpv 影片字幕一鍵連線視窗（完整支援 Flatpak io.mpv.Mpv 與系統原生 mpv）。"""
+"""🎬 mpv 本地動畫／影片字幕連線與 AJATT 進階沉浸視窗（相容 Flatpak io.mpv.Mpv 與系統原生 mpv）。"""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
+    QDoubleSpinBox,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -28,9 +29,10 @@ from galgame_anki.config import AppConfig
 
 
 class MediaBridgeDialog(QDialog):
-    """讓置頂覆蓋層一鍵讀取 Flatpak / 原生 mpv 本地動畫與影片字幕（自動隱藏原字幕、無損抽幀與切原聲）。"""
+    """控制 Flatpak / 原生 mpv 字幕連線、原生字幕隱藏、無字幕倍速快進（sub-transition）與句尾自動暫停。"""
 
     mpv_launched = Signal()
+    immersion_settings_changed = Signal()
 
     def __init__(
         self,
@@ -39,8 +41,8 @@ class MediaBridgeDialog(QDialog):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("🎬 mpv 本地動畫／影片字幕連線")
-        self.resize(650, 310)
+        self.setWindowTitle("🎬 mpv 本地動畫／影片字幕與進階沉浸設定")
+        self.resize(710, 500)
         self.config = config
         self.mpv_bridge = mpv_bridge
         self._mpv_sub_hidden = False
@@ -54,17 +56,18 @@ class MediaBridgeDialog(QDialog):
 
         intro = QLabel(
             "除了 Galgame 之外，GalAnki 的置頂覆蓋層也能直接讀取 <b>mpv 本地動畫／影片（支援 Flatpak io.mpv.Mpv）</b> "
-            "的日語字幕，並自動隱藏 mpv 內建原字幕（絕不看兩份字幕）！"
+            "的日語字幕，並結合 <b>AJATT sub-transition（無字幕片段自動倍速）</b> 與 <b>多行合併製卡</b>！"
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
+        # === 區塊 1：mpv 連線與設定 ===
         mpv_box = QFrame()
         mpv_box.setObjectName("CardPanel")
         ml = QVBoxLayout(mpv_box)
         ml.setSpacing(9)
 
-        mpv_title = QLabel("🎬 mpv 本地動畫／影片字幕（無損抽幀＋精準時間軸原聲！）")
+        mpv_title = QLabel("1️⃣ mpv 本地動畫／影片字幕連線（無損抽幀＋精準時間軸原聲）")
         mpv_title.setStyleSheet("font-weight: 700; font-size: 14px; background: transparent;")
         ml.addWidget(mpv_title)
 
@@ -106,14 +109,60 @@ class MediaBridgeDialog(QDialog):
 
         m_btns.addStretch()
         ml.addLayout(m_btns)
+        layout.addWidget(mpv_box)
+
+        # === 區塊 2：AJATT sub-transition & 精讀控制 ===
+        imm_box = QFrame()
+        imm_box.setObjectName("CardPanel")
+        il = QVBoxLayout(imm_box)
+        il.setSpacing(8)
+
+        imm_title = QLabel("2️⃣ AJATT 主動濃縮沉浸（無字幕自動快進 · 句尾自動暫停 · 單鍵重播）")
+        imm_title.setStyleSheet("font-weight: 700; font-size: 13.5px; background: transparent;")
+        il.addWidget(imm_title)
+
+        spd_row = QHBoxLayout()
+        self.auto_speedup_chk = QCheckBox("⚡ 無字幕空白片段自動倍速略過（sub-transition，字幕出現瞬間切回 1.0x）")
+        self.auto_speedup_chk.setChecked(self.config.mpv_auto_speedup)
+        self.auto_speedup_chk.toggled.connect(self._apply_immersion_opts)
+        spd_row.addWidget(self.auto_speedup_chk, 1)
+
+        spd_row.addWidget(QLabel("快進倍率："))
+        self.fast_speed_spin = QDoubleSpinBox()
+        self.fast_speed_spin.setRange(1.2, 4.0)
+        self.fast_speed_spin.setSingleStep(0.25)
+        self.fast_speed_spin.setValue(self.config.mpv_fast_speed)
+        self.fast_speed_spin.setSuffix("x")
+        self.fast_speed_spin.valueChanged.connect(self._apply_immersion_opts)
+        spd_row.addWidget(self.fast_speed_spin)
+        il.addLayout(spd_row)
+
+        self.auto_pause_chk = QCheckBox("⏸ 每句字幕結束自動暫停（精讀查詞模式；適合逐句吃透生詞）")
+        self.auto_pause_chk.setChecked(self.config.mpv_auto_pause_sub_end)
+        self.auto_pause_chk.toggled.connect(self._apply_immersion_opts)
+        il.addWidget(self.auto_pause_chk)
+
+        ctrl_row = QHBoxLayout()
+        self.replay_btn = QPushButton("🔁 重播當前台詞")
+        self.replay_btn.setEnabled(self.mpv_bridge.is_connected)
+        self.replay_btn.clicked.connect(self._replay_current)
+        ctrl_row.addWidget(self.replay_btn)
+
+        self.pause_btn = QPushButton("⏯ 暫停／繼續播放")
+        self.pause_btn.setEnabled(self.mpv_bridge.is_connected)
+        self.pause_btn.clicked.connect(self._toggle_pause)
+        ctrl_row.addWidget(self.pause_btn)
+        ctrl_row.addStretch()
+        il.addLayout(ctrl_row)
 
         ml_note = QLabel(
-            "💡 寫入 mpv.conf 後，日後直接雙擊任何日語動畫用 Flatpak mpv 播放就會自動同步；播放中隨時在 mpv 按鍵盤「v」也可切換隱藏原字幕，不影響 GalAnki 讀取字幕與無損切原聲！"
+            "💡 <b>多句字幕合併：</b>當動畫把一句完整台詞拆成兩條字幕時，點主視窗「➕ 合併上句」或覆蓋層「➕」（快捷鍵 <code>Ctrl+J</code>），"
+            "就會把前後兩句文字與影片原聲時間軸一次合併，切出完整不斷尾的 Anki 原聲！"
         )
         ml_note.setObjectName("MutedLabel")
         ml_note.setWordWrap(True)
-        ml.addWidget(ml_note)
-        layout.addWidget(mpv_box)
+        il.addWidget(ml_note)
+        layout.addWidget(imm_box)
 
         bottom = QHBoxLayout()
         bottom.addStretch()
@@ -121,6 +170,25 @@ class MediaBridgeDialog(QDialog):
         close_btn.clicked.connect(self.accept)
         bottom.addWidget(close_btn)
         layout.addLayout(bottom)
+
+    def _apply_immersion_opts(self) -> None:
+        self.config.mpv_auto_speedup = self.auto_speedup_chk.isChecked()
+        self.config.mpv_fast_speed = float(self.fast_speed_spin.value())
+        self.config.mpv_auto_pause_sub_end = self.auto_pause_chk.isChecked()
+        self.config.save()
+        self.mpv_bridge.configure_immersion(
+            auto_speedup=self.config.mpv_auto_speedup,
+            fast_speed=self.config.mpv_fast_speed,
+            auto_pause_sub_end=self.config.mpv_auto_pause_sub_end,
+        )
+        self.immersion_settings_changed.emit()
+
+    def _replay_current(self) -> None:
+        if not self.mpv_bridge.replay_current_subtitle():
+            self.mpv_status.setText("⚠ 尚未收到字幕時間軸，請等下一句字幕出現後再試。")
+
+    def _toggle_pause(self) -> None:
+        self.mpv_bridge.toggle_pause()
 
     def _setup_mpv_conf(self) -> None:
         try:

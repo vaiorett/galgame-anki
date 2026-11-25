@@ -15,6 +15,7 @@ NOTE_FIELDS: list[str] = [
     "TargetWord",
     "TargetReading",
     "PitchAccent",
+    "PitchGraph",
     "Sentence",
     "SentenceFurigana",
     "SentenceTranslation",
@@ -135,6 +136,70 @@ ruby rt {
   opacity: 0.78;
 }
 
+/* AJATT 風格高低音調視覺曲線與四型語義色（嚴格相容 Anki 原生日間／夜間主題） */
+.pitch-graph-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin: 4px 0 12px 0;
+}
+
+.pitch-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px 2px 4px;
+  border-radius: 8px;
+  background: rgba(127, 127, 127, 0.06);
+  border: 1px solid rgba(127, 127, 127, 0.16);
+}
+
+.pitch-svg {
+  display: inline-block;
+  vertical-align: middle;
+}
+
+.pitch-chip-tag {
+  font-size: 11.5px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 5px;
+  border: 1px solid currentColor;
+}
+
+.pt-heiban .pt-line, .pt-heiban .pt-dash, .pt-heiban .pt-drop-ring, .pt-heiban .pt-particle { stroke: #2563eb; }
+.pt-heiban .pt-dot { fill: #2563eb; }
+.pt-tag-heiban { color: #2563eb; background: rgba(37, 99, 235, 0.10); }
+
+.pt-atamadaka .pt-line, .pt-atamadaka .pt-dash, .pt-atamadaka .pt-drop-ring, .pt-atamadaka .pt-particle { stroke: #dc2626; }
+.pt-atamadaka .pt-dot { fill: #dc2626; }
+.pt-tag-atamadaka { color: #dc2626; background: rgba(220, 38, 38, 0.10); }
+
+.pt-nakadaka .pt-line, .pt-nakadaka .pt-dash, .pt-nakadaka .pt-drop-ring, .pt-nakadaka .pt-particle { stroke: #d97706; }
+.pt-nakadaka .pt-dot { fill: #d97706; }
+.pt-tag-nakadaka { color: #d97706; background: rgba(217, 119, 6, 0.11); }
+
+.pt-odaka .pt-line, .pt-odaka .pt-dash, .pt-odaka .pt-drop-ring, .pt-odaka .pt-particle { stroke: #059669; }
+.pt-odaka .pt-dot { fill: #059669; }
+.pt-tag-odaka { color: #059669; background: rgba(5, 150, 105, 0.10); }
+
+.nightMode .pt-heiban .pt-line, .nightMode .pt-heiban .pt-dash, .nightMode .pt-heiban .pt-drop-ring, .nightMode .pt-heiban .pt-particle { stroke: #589cf5; }
+.nightMode .pt-heiban .pt-dot { fill: #589cf5; }
+.nightMode .pt-tag-heiban { color: #589cf5; background: rgba(88, 156, 245, 0.16); }
+
+.nightMode .pt-atamadaka .pt-line, .nightMode .pt-atamadaka .pt-dash, .nightMode .pt-atamadaka .pt-drop-ring, .nightMode .pt-atamadaka .pt-particle { stroke: #f87171; }
+.nightMode .pt-atamadaka .pt-dot { fill: #f87171; }
+.nightMode .pt-tag-atamadaka { color: #f87171; background: rgba(248, 113, 113, 0.16); }
+
+.nightMode .pt-nakadaka .pt-line, .nightMode .pt-nakadaka .pt-dash, .nightMode .pt-nakadaka .pt-drop-ring, .nightMode .pt-nakadaka .pt-particle { stroke: #fbbf24; }
+.nightMode .pt-nakadaka .pt-dot { fill: #fbbf24; }
+.nightMode .pt-tag-nakadaka { color: #fbbf24; background: rgba(251, 191, 36, 0.16); }
+
+.nightMode .pt-odaka .pt-line, .nightMode .pt-odaka .pt-dash, .nightMode .pt-odaka .pt-drop-ring, .nightMode .pt-odaka .pt-particle { stroke: #34d399; }
+.nightMode .pt-odaka .pt-dot { fill: #34d399; }
+.nightMode .pt-tag-odaka { color: #34d399; background: rgba(52, 211, 153, 0.16); }
+
 .core-meaning {
   padding: 11px 15px;
   border-radius: 9px;
@@ -224,7 +289,7 @@ FRONT_TEMPLATE = """
 </script>
 """
 
-BACK_TEMPLATE = """
+BACK_TEMPLATE = r"""
 <div class="stage-{{StageMode}}">
   <div class="gal-meta">
     <span>{{#SourceGame}}{{SourceGame}}{{/SourceGame}}</span>
@@ -263,6 +328,9 @@ BACK_TEMPLATE = """
     {{#TargetReading}}<span class="target-reading">「{{TargetReading}}」</span>{{/TargetReading}}
     {{#PitchAccent}}<span class="pitch-badge">[{{PitchAccent}}]</span>{{/PitchAccent}}
   </div>
+
+  <!-- AJATT 風格高低音調視覺曲線（支援既有舊卡自動於瀏覽器即時渲染 SVG） -->
+  <div class="pitch-graph-row" id="gal-pitch-graph" data-reading="{{TargetReading}}" data-pitch="{{PitchAccent}}">{{PitchGraph}}</div>
 
   <!-- Lv.1 / Lv.2 主顯示：精煉核心釋義（1~2行，拒絕整頁詞典硬搬） -->
   {{#DefinitionBilingual}}
@@ -320,8 +388,49 @@ BACK_TEMPLATE = """
 <script>
 (function () {
   var el = document.getElementById("gal-sentence-back");
-  if (!el) return;
-  el.innerHTML = el.innerHTML.replace(/【([^】]+)】/g, '<span class="focus-word">【$1】</span>');
+  if (el) {
+    el.innerHTML = el.innerHTML.replace(/【([^】]+)】/g, '<span class="focus-word">【$1】</span>');
+  }
+  // 舊卡自動補繪 SVG 高低音調曲線
+  var pg = document.getElementById("gal-pitch-graph");
+  if (!pg || pg.innerHTML.trim() !== "") return;
+  var reading = (pg.getAttribute("data-reading") || "").replace(/[^ぁ-んァ-ヶー]/g, "");
+  var rawPitch = pg.getAttribute("data-pitch") || "";
+  var nums = rawPitch.match(/\d+/g);
+  if (!reading || !nums || !nums.length) { pg.style.display = "none"; return; }
+  var small = "ゃゅょぁぃぅぇぉゎャュョァィゥェォヮ";
+  var moras = [];
+  for (var i = 0; i < reading.length; i++) {
+    var ch = reading[i];
+    if (small.indexOf(ch) >= 0 && moras.length) moras[moras.length - 1] += ch;
+    else moras.push(ch);
+  }
+  var n = moras.length;
+  var labels = { heiban: "平板", atamadaka: "頭高", nakadaka: "中高", odaka: "尾高" };
+  var out = [];
+  nums.slice(0, 2).forEach(function (ns) {
+    var ds = Math.min(Math.max(parseInt(ns, 10) || 0, 0), n);
+    var pt = ds === 0 ? "heiban" : (ds === 1 ? "atamadaka" : (ds >= n ? "odaka" : "nakadaka"));
+    var lv = [];
+    for (var j = 0; j < n + 1; j++) {
+      if (ds === 0) lv.push(j > 0);
+      else if (ds === 1) lv.push(j === 0);
+      else lv.push(j > 0 && j < ds);
+    }
+    var sx = 28, px = 16, yh = 11, yl = 31, yt = 51, w = px * 2 + sx * n, h = 58;
+    var pts = lv.map(function (hi, idx) { return [px + idx * sx, hi ? yh : yl]; });
+    var poly = n >= 2 ? '<polyline class="pt-line" fill="none" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" points="' + pts.slice(0, n).map(function (p) { return p[0] + "," + p[1]; }).join(" ") + '" />' : "";
+    var dash = '<line class="pt-dash" x1="' + pts[n - 1][0] + '" y1="' + pts[n - 1][1] + '" x2="' + pts[n][0] + '" y2="' + pts[n][1] + '" stroke-width="2.0" stroke-dasharray="3,2.5" opacity="0.72" />';
+    var dots = moras.map(function (m, idx) {
+      var ring = (ds > 0 && idx + 1 === ds) ? '<circle class="pt-drop-ring" cx="' + pts[idx][0] + '" cy="' + pts[idx][1] + '" r="7.1" fill="none" stroke-width="1.3" opacity="0.55" />' : "";
+      var fs = m.length > 1 ? 12.2 : 14;
+      return ring + '<circle class="pt-dot" cx="' + pts[idx][0] + '" cy="' + pts[idx][1] + '" r="4.5" /><text class="pt-kana" x="' + pts[idx][0] + '" y="' + yt + '" text-anchor="middle" fill="currentColor" font-size="' + fs + '">' + m + '</text>';
+    }).join("");
+    var part = '<circle class="pt-particle" cx="' + pts[n][0] + '" cy="' + pts[n][1] + '" r="4.0" fill="none" stroke-width="1.8" />';
+    var svg = '<svg class="pitch-svg pt-' + pt + '" width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '">' + poly + dash + dots + part + '</svg>';
+    out.push('<span class="pitch-item pt-' + pt + '">' + svg + '<span class="pitch-chip-tag pt-tag-' + pt + '">' + labels[pt] + ' [' + ds + ']</span></span>');
+  });
+  pg.innerHTML = out.join("");
 })();
 </script>
 """

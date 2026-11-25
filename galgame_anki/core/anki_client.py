@@ -21,6 +21,7 @@ from galgame_anki.core.anki_templates import (
     NOTE_TYPE_NAME,
     build_model_payload,
 )
+from galgame_anki.core.pitch_accent import render_pitch_graphs_html
 
 ANKICONNECT_ADDON_CODE = "2055492159"
 
@@ -38,6 +39,7 @@ class AnkiCardPayload:
     sentence_furigana: str
     definition_bilingual: str
     definition_monolingual: str
+    pitch_graph: str = ""
     sentence_translation: str = ""
     source_game: str = ""
     stage_mode: str = "lv2"
@@ -318,6 +320,12 @@ class AnkiConnectClient:
             if t and t not in tags:
                 tags.append(t)
 
+        pitch_graph_html = card.pitch_graph or render_pitch_graphs_html(
+            reading=card.target_reading,
+            pitches=card.pitch_accent,
+            use_css_colors=True,
+        )
+
         note = {
             "deckName": deck_name,
             "modelName": note_type,
@@ -325,6 +333,7 @@ class AnkiConnectClient:
                 "TargetWord": card.target_word,
                 "TargetReading": card.target_reading,
                 "PitchAccent": card.pitch_accent,
+                "PitchGraph": pitch_graph_html,
                 "Sentence": card.sentence,
                 "SentenceFurigana": card.sentence_furigana,
                 "SentenceTranslation": card.sentence_translation,

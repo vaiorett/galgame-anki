@@ -22,6 +22,8 @@ import subprocess
 import tempfile
 import threading
 import time
+from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -42,6 +44,11 @@ from galgame_anki.adapters.xp3_psb import (
 from galgame_anki.config import get_data_dir
 
 AUDIO_EXTS = {".opus", ".ogg", ".wav", ".mp3", ".flac", ".m4a"}
+_GENERIC_VOICE_PREFIXES = frozenset(
+    {"vo", "voice", "cv", "se", "sys", "bgm", "track", "snd", "audio", "line", "msg", "snd"}
+)
+_VOICE_CHAR_PREFIX_RE = re.compile(r"^([A-Za-z]{2,6})[_-]")
+_MYSTERY_SPEAKERS = frozenset({"", "？？？", "???", "？", "?", "みんな", "全員", "一同", "声"})
 _STRIP_RUBY_KS_RE = re.compile(r"\[[^\]]*\]")
 _WS_RE = re.compile(r"[\s\u3000・]+")
 _OUTER_QUOTE_RE = re.compile(r"^[「『（(【\[]+|[」』）)】\]]+$")
@@ -85,6 +92,79 @@ class VoicePackSummary:
     voiced_line_count: int
     asset_count: int
     created_at: float
+
+
+@dataclass
+class VoiceCharacterGroup:
+    """單一角色的純人聲分類（嚴格僅含單人獨白，不混入多人合聲或其他角色）。"""
+
+    char_key: str
+    display_name: str
+    voice_prefix: str
+    solo_line_count: int
+    scene_count: int
+
+
+def classify_solo_line_character(speaker: str, voice_id: str) -> tuple[str, str]:
+    """依語音檔前綴或說話者名稱歸類單人台詞，回傳 `(char_key, voice_prefix)`。"""
+    stem = Path(voice_id).stem
+    m = _VOICE_CHAR_PREFIX_RE.match(stem)
+    if m:
+        pref = m.group(1).upper()
+        if pref.lower() not in _GENERIC_VOICE_PREFIXES:
+            return f"prefix:{pref}", pref
+    spk = (speaker or "").strip()
+    if spk and spk not in _MYSTERY_SPEAKERS:
+        return f"spk:{spk}", ""
+    return "spk:未標記角色", ""
+
+
+def _decode_audio_bytes_to_pcm24k(audio_bytes: bytes, ext: str = ".ogg") -> bytes:
+    """將單一語音位元組解碼為 24kHz mono s16le PCM（供無縫拼接濃縮聽力與計算精確 LRC 時間戳）。"""
+    if not audio_bytes:
+        return b""
+    suffix = ext.lower() if ext.startswith(".") else f".{ext.lower()}"
+    with tempfile.NamedTemporaryFile(prefix="galanki_dec_", suffix=suffix, delete=True) as tf:
+        tf.write(audio_bytes)
+        tf.flush()
+        try:
+            res = subprocess.run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-v",
+                    "error",
+                    "-i",
+                    tf.name,
+                    "-ac",
+                    "1",
+                    "-ar",
+                    "24000",
+                    "-f",
+                    "s16le",
+                    "pipe:1",
+                ],
+                capture_output=True,
+                timeout=15,
+                check=False,
+            )
+            if res.returncode == 0 and res.stdout:
+                return res.stdout
+        except (OSError, subprocess.SubprocessError):
+            return b""
+    return b""
+
+
+def _format_lrc_timestamp(seconds: float) -> str:
+    sec = max(0.0, float(seconds))
+    mins = int(sec // 60)
+    rem = sec - mins * 60
+    return f"[{mins:02d}:{rem:05.2f}]"
+
+
+def _safe_filename_part(name: str, fallback: str = "voice") -> str:
+    cleaned = re.sub(r'[\\/:*?"<>|\r\n\t]+', "_", (name or "").strip()).strip("._ ")
+    return cleaned[:48] or fallback
 
 
 @dataclass
@@ -938,4 +1018,385 @@ class VoicePackManager:
             "exported_voices": exported_voices,
             "script_json": str(script_json_path),
             "line_count": len(lines),
+        }
+
+    def list_pack_scenes(self, pack_id: str) -> list[str]:
+        """依劇情先後順序列出該遊戲索引中的所有章節／劇本檔名。"""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT scene_file FROM dialogue_lines "
+                "WHERE pack_id = ? AND scene_file != '' "
+                "GROUP BY scene_file ORDER BY MIN(seq_index) ASC",
+                (pack_id,),
+            ).fetchall()
+        return [str(r["scene_file"]) for r in rows]
+
+    def _scene_seq_bounds(
+        self,
+        pack_id: str,
+        start_scene: str = "",
+        end_scene: str = "",
+    ) -> tuple[int | None, int | None]:
+        min_seq: int | None = None
+        max_seq: int | None = None
+        with self._lock:
+            if start_scene:
+                row = self._conn.execute(
+                    "SELECT MIN(seq_index) AS v FROM dialogue_lines WHERE pack_id = ? AND scene_file = ?",
+                    (pack_id, start_scene),
+                ).fetchone()
+                if row and row["v"] is not None:
+                    min_seq = int(row["v"])
+            if end_scene:
+                row = self._conn.execute(
+                    "SELECT MAX(seq_index) AS v FROM dialogue_lines WHERE pack_id = ? AND scene_file = ?",
+                    (pack_id, end_scene),
+                ).fetchone()
+                if row and row["v"] is not None:
+                    max_seq = int(row["v"])
+        if min_seq is not None and max_seq is not None and min_seq > max_seq:
+            min_seq, max_seq = max_seq, min_seq
+        return min_seq, max_seq
+
+    def list_pack_characters(
+        self,
+        pack_id: str,
+        start_scene: str = "",
+        end_scene: str = "",
+    ) -> list[VoiceCharacterGroup]:
+        """統計該遊戲（或指定章節範圍）內各角色的純獨白配音數量（嚴格排除多人合聲，絕不混音）。"""
+        min_seq, max_seq = self._scene_seq_bounds(pack_id, start_scene, end_scene)
+        sql = (
+            "SELECT scene_file, speaker, voice_ids_json FROM dialogue_lines "
+            "WHERE pack_id = ? AND voice_ids_json != '[]'"
+        )
+        params: list[Any] = [pack_id]
+        if min_seq is not None:
+            sql += " AND seq_index >= ?"
+            params.append(min_seq)
+        if max_seq is not None:
+            sql += " AND seq_index <= ?"
+            params.append(max_seq)
+        sql += " ORDER BY seq_index ASC"
+
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+            asset_stems = {
+                str(r["stem_lower"])
+                for r in self._conn.execute(
+                    "SELECT stem_lower FROM voice_assets WHERE pack_id = ?",
+                    (pack_id,),
+                ).fetchall()
+            }
+
+        counts: Counter[str] = Counter()
+        pref_map: dict[str, str] = {}
+        spk_votes: dict[str, Counter[str]] = defaultdict(Counter)
+        scene_sets: dict[str, set[str]] = defaultdict(set)
+
+        for r in rows:
+            vids = [str(v) for v in (json.loads(r["voice_ids_json"] or "[]")) if v]
+            # 嚴格只取單人獨白：絕不把 2 位以上角色的合聲混入個人角色音軌！
+            if len(vids) != 1:
+                continue
+            vid = vids[0]
+            if Path(vid).stem.lower() not in asset_stems:
+                continue
+            spk = str(r["speaker"] or "").strip()
+            ckey, pref = classify_solo_line_character(spk, vid)
+            counts[ckey] += 1
+            if pref:
+                pref_map[ckey] = pref
+            if spk and spk not in _MYSTERY_SPEAKERS:
+                spk_votes[ckey][spk] += 1
+            if r["scene_file"]:
+                scene_sets[ckey].add(str(r["scene_file"]))
+
+        groups: list[VoiceCharacterGroup] = []
+        for ckey, cnt in counts.most_common():
+            pref = pref_map.get(ckey, "")
+            if spk_votes[ckey]:
+                disp = spk_votes[ckey].most_common(1)[0][0]
+            elif ckey.startswith("spk:"):
+                disp = ckey[4:]
+            else:
+                disp = pref or ckey
+            groups.append(
+                VoiceCharacterGroup(
+                    char_key=ckey,
+                    display_name=disp,
+                    voice_prefix=pref,
+                    solo_line_count=cnt,
+                    scene_count=len(scene_sets[ckey]),
+                )
+            )
+        return groups
+
+    def iter_pack_lines(
+        self,
+        pack_id: str,
+        start_scene: str = "",
+        end_scene: str = "",
+        voiced_only: bool = True,
+        char_key: str = "",
+    ) -> list[dict[str, Any]]:
+        """讀取遊戲劇本台詞（支援章節防劇透篩選、只看有純人聲、只看指定角色）。"""
+        min_seq, max_seq = self._scene_seq_bounds(pack_id, start_scene, end_scene)
+        sql = (
+            "SELECT seq_index, scene_file, speaker, clean_text, voice_ids_json, translation "
+            "FROM dialogue_lines WHERE pack_id = ?"
+        )
+        params: list[Any] = [pack_id]
+        if voiced_only or char_key:
+            sql += " AND voice_ids_json != '[]'"
+        if min_seq is not None:
+            sql += " AND seq_index >= ?"
+            params.append(min_seq)
+        if max_seq is not None:
+            sql += " AND seq_index <= ?"
+            params.append(max_seq)
+        sql += " ORDER BY seq_index ASC"
+
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+            asset_stems = {
+                str(r["stem_lower"])
+                for r in self._conn.execute(
+                    "SELECT stem_lower FROM voice_assets WHERE pack_id = ?",
+                    (pack_id,),
+                ).fetchall()
+            }
+
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            vids = [
+                str(v)
+                for v in (json.loads(r["voice_ids_json"] or "[]"))
+                if v and Path(str(v)).stem.lower() in asset_stems
+            ]
+            if (voiced_only or char_key) and not vids:
+                continue
+            spk = str(r["speaker"] or "").strip()
+            line_ckey = ""
+            if len(vids) == 1:
+                line_ckey, _ = classify_solo_line_character(spk, vids[0])
+            if char_key:
+                # 若指定特定角色，嚴格僅回傳該角色的單人獨白，不混入他人
+                if len(vids) != 1 or line_ckey != char_key:
+                    continue
+            out.append(
+                {
+                    "seq_index": int(r["seq_index"]),
+                    "scene_file": str(r["scene_file"] or ""),
+                    "speaker": spk,
+                    "char_key": line_ckey,
+                    "clean_text": str(r["clean_text"] or ""),
+                    "voice_ids": vids,
+                    "translation": str(r["translation"] or ""),
+                }
+            )
+        return out
+
+    def extract_single_line_mp3(
+        self,
+        pack_id: str,
+        voice_ids: list[str],
+    ) -> tuple[bytes, str] | None:
+        """依指定的 voice_ids 直接從封包／解包目錄抽出乾淨 MP3（供 1T 句庫即時試聽與製卡使用）。"""
+        raw_assets: list[tuple[bytes, str]] = []
+        for vid in voice_ids:
+            loaded = self._load_asset_bytes(pack_id, vid)
+            if loaded is not None:
+                raw_assets.append(loaded)
+        if not raw_assets:
+            return None
+        mp3 = _mix_multi_audio_to_mp3(raw_assets)
+        if not mp3:
+            return None
+        safe_stem = re.sub(r"[^\w-]+", "_", voice_ids[0])[:32]
+        return mp3, f"galanki_pure_{safe_stem}_{int(time.time() * 1000)}.mp3"
+
+    def export_condensed_character_audio(
+        self,
+        pack_id: str,
+        char_keys: list[str],
+        output_dir: Path,
+        start_scene: str = "",
+        end_scene: str = "",
+        gap_seconds: float = 0.4,
+        bitrate: str = "96k",
+        write_lrc: bool = True,
+        progress_cb: Callable[[str], None] | None = None,
+    ) -> dict[str, Any]:
+        """按人物獨立匯出「濃縮純人聲被動聽力 MP3」（絕不將不同角色的聲音混在同一個音檔裡！）。
+
+        若勾選多位角色，會於 `output_dir` 中為每位角色各自輸出獨立的 `.mp3` 與同步 `.lrc` 台詞字幕。
+        """
+        if not char_keys:
+            raise ValueError("請至少選擇 1 位角色進行匯出。")
+
+        packs = [p for p in self.list_packs() if p.pack_id == pack_id]
+        if not packs:
+            raise ValueError(f"找不到指定的純人聲索引包：{pack_id}")
+        pack = packs[0]
+
+        all_chars = {
+            c.char_key: c
+            for c in self.list_pack_characters(pack_id, start_scene=start_scene, end_scene=end_scene)
+        }
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        gap_sec = max(0.0, min(3.0, float(gap_seconds)))
+        gap_pcm = b"\x00" * (int(24000 * gap_sec) * 2)  # 24kHz mono 16-bit = 48000 B/s
+        scene_suffix = ""
+        if start_scene or end_scene:
+            s1 = Path(start_scene).stem.replace(".ks", "") if start_scene else "start"
+            s2 = Path(end_scene).stem.replace(".ks", "") if end_scene else "end"
+            scene_suffix = f"_{_safe_filename_part(s1)}-{_safe_filename_part(s2)}"
+
+        exported_files: list[dict[str, Any]] = []
+
+        for char_idx, ckey in enumerate(char_keys, start=1):
+            cinfo = all_chars.get(ckey)
+            char_name = cinfo.display_name if cinfo else (ckey.split(":", 1)[-1] or "character")
+            lines = self.iter_pack_lines(
+                pack_id,
+                start_scene=start_scene,
+                end_scene=end_scene,
+                voiced_only=True,
+                char_key=ckey,
+            )
+            if not lines:
+                continue
+
+            base_name = f"{_safe_filename_part(pack.game_name)}_{_safe_filename_part(char_name)}{scene_suffix}_純人聲"
+            mp3_path = output_dir / f"{base_name}.mp3"
+            lrc_path = output_dir / f"{base_name}.lrc"
+            txt_path = output_dir / f"{base_name}_台詞清單.txt"
+
+            if progress_cb:
+                progress_cb(f"[{char_idx}/{len(char_keys)}] 正在解碼「{char_name}」的 {len(lines)} 句純人聲...")
+
+            enc = subprocess.Popen(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-v",
+                    "error",
+                    "-f",
+                    "s16le",
+                    "-ar",
+                    "24000",
+                    "-ac",
+                    "1",
+                    "-i",
+                    "pipe:0",
+                    "-codec:a",
+                    "libmp3lame",
+                    "-b:a",
+                    bitrate,
+                    str(mp3_path),
+                ],
+                stdin=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            lrc_lines: list[str] = [
+                f"[ti:{pack.game_name} - {char_name} 純人聲濃縮聽力]",
+                f"[ar:{char_name}]",
+                f"[al:{pack.game_name}]",
+            ]
+            txt_lines: list[str] = [f"# {pack.game_name} — {char_name} 純人聲濃縮聽力 ({len(lines)} 句)\n"]
+
+            elapsed_sec = 0.0
+            written_lines = 0
+            batch_size = 32
+
+            try:
+                assert enc.stdin is not None
+                with ThreadPoolExecutor(max_workers=6) as pool:
+                    for b_start in range(0, len(lines), batch_size):
+                        batch = lines[b_start : b_start + batch_size]
+                        raw_pairs: list[tuple[dict[str, Any], tuple[bytes, str] | None]] = [
+                            (ln, self._load_asset_bytes(pack_id, ln["voice_ids"][0]))
+                            for ln in batch
+                        ]
+                        futures = [
+                            pool.submit(_decode_audio_bytes_to_pcm24k, pair[0], pair[1])
+                            if pair is not None
+                            else None
+                            for _, pair in raw_pairs
+                        ]
+                        for (ln, _), fut in zip(raw_pairs, futures):
+                            if fut is None:
+                                continue
+                            pcm = fut.result()
+                            if not pcm:
+                                continue
+                            if written_lines > 0 and gap_pcm:
+                                enc.stdin.write(gap_pcm)
+                                elapsed_sec += gap_sec
+
+                            ts = _format_lrc_timestamp(elapsed_sec)
+                            jp_single = ln["clean_text"].replace("\n", " ").strip()
+                            lrc_lines.append(f"{ts}{jp_single}")
+                            tr_part = f"　｜　{ln['translation'].replace(chr(10), ' ')}" if ln["translation"] else ""
+                            txt_lines.append(f"{ts} [{ln['scene_file']}] {jp_single}{tr_part}")
+
+                            enc.stdin.write(pcm)
+                            elapsed_sec += len(pcm) / 48000.0
+                            written_lines += 1
+
+                        if progress_cb:
+                            done = min(b_start + len(batch), len(lines))
+                            progress_cb(
+                                f"[{char_idx}/{len(char_keys)}] 「{char_name}」進度 {done}/{len(lines)} 句 ({elapsed_sec / 60:.1f} 分鐘)..."
+                            )
+                enc.stdin.close()
+                stderr_b = enc.stderr.read() if enc.stderr else b""
+                if enc.stderr:
+                    enc.stderr.close()
+                rc = enc.wait(timeout=60)
+                if rc != 0:
+                    raise RuntimeError(
+                        f"FFmpeg 編碼「{char_name}」失敗：{stderr_b.decode('utf-8', errors='ignore').strip()}"
+                    )
+            except Exception:
+                if enc.stdin and not enc.stdin.closed:
+                    enc.stdin.close()
+                if enc.stderr and not enc.stderr.closed:
+                    enc.stderr.close()
+                enc.kill()
+                enc.wait()
+                mp3_path.unlink(missing_ok=True)
+                raise
+
+            if written_lines == 0 or not mp3_path.exists():
+                mp3_path.unlink(missing_ok=True)
+                continue
+
+            if write_lrc:
+                lrc_path.write_text("\n".join(lrc_lines) + "\n", encoding="utf-8")
+                txt_path.write_text("\n".join(txt_lines) + "\n", encoding="utf-8")
+
+            exported_files.append(
+                {
+                    "char_key": ckey,
+                    "char_name": char_name,
+                    "mp3_path": str(mp3_path),
+                    "lrc_path": str(lrc_path) if write_lrc else "",
+                    "txt_path": str(txt_path) if write_lrc else "",
+                    "line_count": written_lines,
+                    "duration_sec": round(elapsed_sec, 2),
+                    "size_bytes": mp3_path.stat().st_size,
+                }
+            )
+
+        if not exported_files:
+            raise RuntimeError("所選角色在指定章節範圍內沒有可匯出的純人聲。")
+
+        return {
+            "output_dir": str(output_dir),
+            "game_name": pack.game_name,
+            "files": exported_files,
         }

@@ -209,9 +209,23 @@ def parse_mpv_ipc_message(
     if name == "sub-end":
         state["sub_end"] = float(data) if isinstance(data, (int, float)) else None
         return None
+    if name == "pause":
+        state["paused"] = bool(data)
+        return None
+    if name == "speed":
+        if isinstance(data, (int, float)):
+            state["speed"] = float(data)
+        return None
     if name == "sub-text":
         text = str(data or "").strip()
-        if not text or text == state.get("last_sub"):
+        if not text:
+            if state.get("sub_active"):
+                state["sub_active"] = False
+                state["sub_just_cleared"] = True
+            return None
+        state["sub_active"] = True
+        state["sub_just_cleared"] = False
+        if text == state.get("last_sub"):
             return None
         state["last_sub"] = text
         return MpvSubtitleEvent(
@@ -225,7 +239,7 @@ def parse_mpv_ipc_message(
 
 
 class MpvSubtitleBridge(QObject):
-    """背景自動探索並監聽原生／Flatpak mpv IPC Socket 的跨執行緒字幕橋接器。"""
+    """背景自動探索並監聽原生／Flatpak mpv IPC Socket 的跨執行緒字幕與沉浸控制橋接器。"""
 
     subtitle_received = Signal(object)     # MpvSubtitleEvent
     connection_changed = Signal(bool, str) # (connected, status_msg)
@@ -243,22 +257,114 @@ class MpvSubtitleBridge(QObject):
         self._active_sock: socket.socket | None = None
         self._sock_lock = threading.Lock()
 
+        # AJATT mpv 進階沉浸狀態（sub-transition 無字幕自動倍速 ＋ 句尾自動暫停 ＋ 單鍵重播）
+        self._auto_speedup: bool = False
+        self._fast_speed: float = 2.0
+        self._normal_speed: float = 1.0
+        self._auto_pause_sub_end: bool = False
+        self._sped_up: bool = False
+        self._speed_timer: threading.Timer | None = None
+        self._last_sub_start: float | None = None
+        self._last_sub_end: float | None = None
+        self._paused: bool = False
+
     @property
     def is_connected(self) -> bool:
         return self._connected
 
-    def set_native_subtitle_visible(self, visible: bool) -> bool:
-        """透過 IPC 即時切換 mpv 原生字幕顯示/隱藏（讓覆蓋層成為唯一字幕，絕不看 2 份字幕！）。"""
-        cmd = json.dumps({"command": ["set_property", "sub-visibility", bool(visible)]}) + "\n"
+    def send_ipc_command(self, command: list[Any]) -> bool:
+        """透過 JSON IPC 向執行中的 mpv 傳送控制指令。"""
+        raw = (json.dumps({"command": command}) + "\n").encode("utf-8")
         with self._sock_lock:
             sock = self._active_sock
             if sock is None:
                 return False
             try:
-                sock.sendall(cmd.encode("utf-8"))
+                sock.sendall(raw)
                 return True
             except OSError:
                 return False
+
+    def set_native_subtitle_visible(self, visible: bool) -> bool:
+        """透過 IPC 即時切換 mpv 原生字幕顯示/隱藏（讓覆蓋層成為唯一字幕，絕不看 2 份字幕！）。"""
+        return self.send_ipc_command(["set_property", "sub-visibility", bool(visible)])
+
+    def set_speed(self, speed: float) -> bool:
+        clamped = max(0.5, min(4.0, float(speed)))
+        return self.send_ipc_command(["set_property", "speed", clamped])
+
+    def set_pause(self, paused: bool) -> bool:
+        return self.send_ipc_command(["set_property", "pause", bool(paused)])
+
+    def toggle_pause(self) -> bool:
+        return self.send_ipc_command(["cycle", "pause"])
+
+    def seek_to(self, sec: float) -> bool:
+        return self.send_ipc_command(["seek", max(0.0, float(sec)), "absolute", "exact"])
+
+    def replay_current_subtitle(self, sub_start: float | None = None) -> bool:
+        """單鍵跳回目前字幕開頭並恢復正常倍速重聽一次（類似 mpvacious 重播）。"""
+        target = sub_start if sub_start is not None else self._last_sub_start
+        if target is None:
+            return False
+        self._cancel_speed_timer()
+        if self._sped_up:
+            self.set_speed(self._normal_speed)
+            self._sped_up = False
+        ok = self.seek_to(max(0.0, target - 0.05))
+        if ok:
+            self.set_pause(False)
+        return ok
+
+    def configure_immersion(
+        self,
+        auto_speedup: bool,
+        fast_speed: float = 2.0,
+        auto_pause_sub_end: bool = False,
+    ) -> None:
+        """即時更新無字幕倍速快進（sub-transition）與句尾自動暫停設定。"""
+        self._auto_speedup = bool(auto_speedup)
+        self._fast_speed = max(1.2, min(4.0, float(fast_speed)))
+        self._auto_pause_sub_end = bool(auto_pause_sub_end)
+        if not self._auto_speedup:
+            self._cancel_speed_timer()
+            if self._sped_up:
+                self.set_speed(self._normal_speed)
+                self._sped_up = False
+
+    def _cancel_speed_timer(self) -> None:
+        t = self._speed_timer
+        self._speed_timer = None
+        if t is not None:
+            t.cancel()
+
+    def _on_sub_active(self, sub_start: float | None, sub_end: float | None) -> None:
+        self._cancel_speed_timer()
+        if sub_start is not None:
+            self._last_sub_start = sub_start
+        if sub_end is not None:
+            self._last_sub_end = sub_end
+        if self._sped_up:
+            self.set_speed(self._normal_speed)
+            self._sped_up = False
+
+    def _on_sub_cleared(self) -> None:
+        if self._auto_pause_sub_end and not self._paused:
+            self._cancel_speed_timer()
+            self.set_pause(True)
+            return
+        if self._auto_speedup and not self._paused:
+            self._cancel_speed_timer()
+
+            def _engage_fast() -> None:
+                if self._auto_speedup and self._connected and not self._paused:
+                    if self.set_speed(self._fast_speed):
+                        self._sped_up = True
+
+            t = threading.Timer(0.35, _engage_fast)
+            t.daemon = True
+            self._speed_timer = t
+            t.start()
 
     def start(self) -> None:
         if os.name == "nt":
@@ -270,6 +376,10 @@ class MpvSubtitleBridge(QObject):
         self._thread.start()
 
     def stop(self) -> None:
+        self._cancel_speed_timer()
+        if self._sped_up and self._connected:
+            self.set_speed(self._normal_speed)
+            self._sped_up = False
         self._stop_event.set()
 
     def _loop(self) -> None:
@@ -304,7 +414,7 @@ class MpvSubtitleBridge(QObject):
         with self._sock_lock:
             self._active_sock = sock
         self._connected = True
-        self.connection_changed.emit(True, f"🎬 mpv 已連線 ({Path(sock_path).name})")
+        self.connection_changed.emit(True, "🎬 mpv 已連線")
 
         observe_cmds = [
             {"command": ["observe_property", 1, "sub-text"]},
@@ -312,6 +422,8 @@ class MpvSubtitleBridge(QObject):
             {"command": ["observe_property", 3, "path"]},
             {"command": ["observe_property", 4, "sub-start"]},
             {"command": ["observe_property", 5, "sub-end"]},
+            {"command": ["observe_property", 6, "pause"]},
+            {"command": ["observe_property", 7, "speed"]},
         ]
         try:
             for cmd in observe_cmds:
@@ -347,9 +459,15 @@ class MpvSubtitleBridge(QObject):
                         continue
                     if isinstance(msg, dict):
                         ev = parse_mpv_ipc_message(msg, state)
+                        self._paused = bool(state.get("paused", False))
                         if ev is not None:
+                            self._on_sub_active(ev.sub_start, ev.sub_end)
                             self.subtitle_received.emit(ev)
+                        elif state.pop("sub_just_cleared", False):
+                            self._on_sub_cleared()
         finally:
+            self._cancel_speed_timer()
+            self._sped_up = False
             with self._sock_lock:
                 self._active_sock = None
             sock.close()

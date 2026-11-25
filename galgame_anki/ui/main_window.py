@@ -57,6 +57,7 @@ from galgame_anki.core.grammar_engine import (
     translate_sentence_free,
 )
 from galgame_anki.core.learning_progress import LearningProgressStore
+from galgame_anki.core.sentence_bank import SentenceBankItem, SentenceBankScanner
 from galgame_anki.core.sentence_store import SentenceRecord, SentenceStore
 from galgame_anki.core.tokenizer import (
     JapaneseTokenizer,
@@ -71,6 +72,7 @@ from galgame_anki.ui.hook_dialog import HookManagerDialog
 from galgame_anki.ui.lookup_popup import LookupDetailPanel
 from galgame_anki.ui.media_bridge_dialog import MediaBridgeDialog
 from galgame_anki.ui.overlay_window import OverlayWindow
+from galgame_anki.ui.sentence_bank_dialog import SentenceBankDialog
 from galgame_anki.ui.sentence_widget import InteractiveSentenceWidget
 from galgame_anki.ui.settings_dialog import SettingsDialog
 from galgame_anki.ui.setup_wizard import SetupWizardDialog
@@ -107,6 +109,7 @@ class MainWindow(QMainWindow):
         self.anki = AnkiConnectClient(self.config.anki_url)
         self.store = SentenceStore(max_history=50)
         self.voice_packs = VoicePackManager()
+        self.sentence_bank_scanner = SentenceBankScanner(self.tokenizer, self.dictionary)
         self.ingestion = TextIngestionManager(self)
         self.hook_manager = GameHookManager(self)
         self.mpv_bridge = MpvSubtitleBridge(parent=self)
@@ -117,6 +120,7 @@ class MainWindow(QMainWindow):
         self._current_record: SentenceRecord | None = None
         self._selected_token: Token | None = None
         self._anki_connected: bool = False
+        self._closing: bool = False
 
         self.overlay = OverlayWindow(
             theme_name=self.config.ui_theme,
@@ -140,6 +144,7 @@ class MainWindow(QMainWindow):
         self.overlay.translate_requested.connect(self._translate_record_for_overlay)
         self.overlay.prev_requested.connect(self._step_history_prev)
         self.overlay.next_requested.connect(self._step_history_next)
+        self.overlay.merge_prev_requested.connect(self._merge_previous_sentence)
         self.overlay.ocr_requested.connect(self._trigger_region_ocr)
         self.overlay.audio_preview_requested.connect(self._preview_current_audio)
         self.overlay.visibility_changed.connect(self._on_overlay_visibility_changed)
@@ -288,6 +293,28 @@ class MainWindow(QMainWindow):
         self.sentence_badge.setObjectName("PillOk")
         meta_row.addWidget(self.sentence_badge)
 
+        self.mpv_replay_btn = QPushButton("🔁 重播")
+        self.mpv_replay_btn.setObjectName("GhostBtn")
+        self.mpv_replay_btn.setToolTip("跳回目前 mpv 字幕開頭重聽一次")
+        self.mpv_replay_btn.clicked.connect(self._replay_mpv_current)
+        self.mpv_replay_btn.hide()
+        meta_row.addWidget(self.mpv_replay_btn)
+
+        self.mpv_speed_btn = QPushButton("⚡ 倍速")
+        self.mpv_speed_btn.setObjectName("GhostBtn")
+        self.mpv_speed_btn.setCheckable(True)
+        self.mpv_speed_btn.setChecked(self.config.mpv_auto_speedup)
+        self.mpv_speed_btn.setToolTip("無字幕片段自動倍速快進（sub-transition），字幕出現立即回 1.0x")
+        self.mpv_speed_btn.clicked.connect(self._toggle_mpv_auto_speedup)
+        self.mpv_speed_btn.hide()
+        meta_row.addWidget(self.mpv_speed_btn)
+
+        self.merge_prev_btn = QPushButton("➕ 合併上句")
+        self.merge_prev_btn.setObjectName("GhostBtn")
+        self.merge_prev_btn.setToolTip("合併上一句與本句台詞（同時合併 mpv 原聲時間軸，快捷鍵 Ctrl+J）")
+        self.merge_prev_btn.clicked.connect(self._merge_previous_sentence)
+        meta_row.addWidget(self.merge_prev_btn)
+
         self.translate_btn = QPushButton("🌐 核對句意")
         self.translate_btn.setObjectName("GhostBtn")
         self.translate_btn.setToolTip("卡住時點一下核對整句自然中文意思（按需呼叫免費翻譯，平時隱藏不劇透）")
@@ -387,8 +414,16 @@ class MainWindow(QMainWindow):
         self.game_menu.addAction(act_media)
 
         act_voice = QAction("📦 解包遊戲提取純人聲 (0% BGM)...", self)
-        act_voice.triggered.connect(self.open_voice_pack_manager)
+        act_voice.triggered.connect(lambda: self.open_voice_pack_manager(initial_tab=0))
         self.game_menu.addAction(act_voice)
+
+        act_cond = QAction("🎧 按角色匯出濃縮被動聽力 MP3...", self)
+        act_cond.triggered.connect(lambda: self.open_voice_pack_manager(initial_tab=1))
+        self.game_menu.addAction(act_cond)
+
+        act_bank = QAction("💎 1T 黃金句礦場（從劇本挖礦）...", self)
+        act_bank.triggered.connect(self.open_sentence_bank)
+        self.game_menu.addAction(act_bank)
 
         if self.config.recent_games:
             self.game_menu.addSeparator()
@@ -417,8 +452,16 @@ class MainWindow(QMainWindow):
         self.more_menu.addAction(act_media)
 
         act_voice = QAction("📦 遊戲解包與純人聲索引管理...", self)
-        act_voice.triggered.connect(self.open_voice_pack_manager)
+        act_voice.triggered.connect(lambda: self.open_voice_pack_manager(initial_tab=0))
         self.more_menu.addAction(act_voice)
+
+        act_cond = QAction("🎧 按角色匯出濃縮被動聽力 MP3...", self)
+        act_cond.triggered.connect(lambda: self.open_voice_pack_manager(initial_tab=1))
+        self.more_menu.addAction(act_cond)
+
+        act_bank = QAction("💎 1T 黃金句礦場（Sentence Bank）...", self)
+        act_bank.triggered.connect(self.open_sentence_bank)
+        self.more_menu.addAction(act_bank)
 
         self.more_menu.addSeparator()
 
@@ -458,6 +501,8 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+M"), self, activated=self._shortcut_mine)
         QShortcut(QKeySequence("Ctrl+Shift+O"), self, activated=self._trigger_region_ocr)
         QShortcut(QKeySequence("Ctrl+P"), self, activated=self._preview_current_audio)
+        QShortcut(QKeySequence("Ctrl+J"), self, activated=self._merge_previous_sentence)
+        QShortcut(QKeySequence("Ctrl+Shift+M"), self, activated=self.open_sentence_bank)
         QShortcut(QKeySequence("Ctrl+B"), self, activated=self.open_learning_blueprint)
         QShortcut(QKeySequence("Ctrl+1"), self, activated=lambda: self._set_stage_mode("lv1"))
         QShortcut(QKeySequence("Ctrl+2"), self, activated=lambda: self._set_stage_mode("lv2"))
@@ -480,6 +525,11 @@ class MainWindow(QMainWindow):
         self.hook_manager.console_logged.connect(self._on_hook_console_log)
         self.hook_manager.hook_state_changed.connect(self._on_hook_state_changed)
 
+        self.mpv_bridge.configure_immersion(
+            auto_speedup=self.config.mpv_auto_speedup,
+            fast_speed=self.config.mpv_fast_speed,
+            auto_pause_sub_end=self.config.mpv_auto_pause_sub_end,
+        )
         self.mpv_bridge.subtitle_received.connect(self._on_mpv_subtitle)
         self.mpv_bridge.connection_changed.connect(self._on_mpv_state_changed)
         self.mpv_bridge.start()
@@ -718,6 +768,8 @@ class MainWindow(QMainWindow):
         self._ingest_sentence(text, source=source, media_title=media_title)
 
     def _on_mpv_state_changed(self, connected: bool, msg: str) -> None:
+        self.mpv_replay_btn.setVisible(connected)
+        self.mpv_speed_btn.setVisible(connected)
         if connected:
             self.game_badge.setText(msg)
             self.game_badge.setObjectName("PillOk")
@@ -727,8 +779,54 @@ class MainWindow(QMainWindow):
                 self.mpv_bridge.set_native_subtitle_visible(False)
         self.statusBar().showMessage(msg, 4500)
 
+    def _toggle_mpv_auto_speedup(self, checked: bool) -> None:
+        self.config.mpv_auto_speedup = checked
+        self.config.save()
+        self.mpv_bridge.configure_immersion(
+            auto_speedup=self.config.mpv_auto_speedup,
+            fast_speed=self.config.mpv_fast_speed,
+            auto_pause_sub_end=self.config.mpv_auto_pause_sub_end,
+        )
+        self.statusBar().showMessage(
+            f"⚡ 已開啟無字幕自動 {self.config.mpv_fast_speed:.1f}x 快進（sub-transition）"
+            if checked
+            else "已關閉無字幕自動倍速，恢復 1.0x 原速播放",
+            4000,
+        )
+
+    def _replay_mpv_current(self) -> None:
+        sub_start = self._current_record.sub_start if self._current_record else None
+        if self.mpv_bridge.replay_current_subtitle(sub_start=sub_start):
+            self.statusBar().showMessage("🔁 已跳回本句字幕開頭重播", 2500)
+        else:
+            self.statusBar().showMessage("目前 mpv 尚未記錄字幕時間軸。", 3000)
+
+    def _merge_previous_sentence(self) -> None:
+        cur = self._current_record or self.store.latest()
+        if cur is None:
+            return
+        prev = self.store.peek_previous_record(cur.record_id)
+        if prev is None:
+            self.statusBar().showMessage("目前沒有上一句可合併。", 3000)
+            return
+
+        sep = "　" if prev.raw_text.rstrip().endswith(("。", "！", "？", "!", "?", "」", "』")) else ""
+        merged_text = prev.raw_text.rstrip() + sep + cur.raw_text.lstrip()
+        tokenized = self.tokenizer.tokenize(merged_text, self.store.known_words)
+        analysis = self.grammar_engine.analyze(tokenized)
+        merged = self.store.merge_previous_into_record(cur.record_id, tokenized, grammar_analysis=analysis)
+        if merged is None:
+            return
+
+        self._refresh_history_list(select_record_id=merged.record_id)
+        self._display_record(merged)
+        if self.overlay.isVisible():
+            self.overlay.show_record(merged)
+            self.overlay.show_toast("➕ 已合併上一句（時間軸原聲同步合併）")
+        self.statusBar().showMessage("➕ 已將上一句與本句合併為完整台詞（製卡時將切出合併後完整原聲）", 4500)
+
     def _on_mpv_subtitle(self, ev: MpvSubtitleEvent) -> None:
-        if self.ingestion.paused:
+        if self._closing or self.ingestion.paused:
             return
         if ev.media_title:
             short = ev.media_title[:24] + ("…" if len(ev.media_title) > 24 else "")
@@ -1495,17 +1593,67 @@ class MainWindow(QMainWindow):
             parent=self,
         )
         dlg.mpv_launched.connect(lambda: self._toggle_overlay(True) if not self.overlay.isVisible() else None)
+        dlg.immersion_settings_changed.connect(self._sync_mpv_immersion_buttons)
         dlg.exec()
 
-    def open_voice_pack_manager(self) -> None:
+    def _sync_mpv_immersion_buttons(self) -> None:
+        self.mpv_speed_btn.blockSignals(True)
+        self.mpv_speed_btn.setChecked(self.config.mpv_auto_speedup)
+        self.mpv_speed_btn.blockSignals(False)
+
+    def open_voice_pack_manager(self, initial_tab: int = 0) -> None:
         dlg = VoicePackDialog(
             config=self.config,
             voice_packs=self.voice_packs,
             thread_pool=self.thread_pool,
+            initial_tab=initial_tab,
             parent=self,
         )
         dlg.packs_changed.connect(self._on_voice_packs_changed)
         dlg.exec()
+
+    def open_sentence_bank(self) -> None:
+        dlg = SentenceBankDialog(
+            config=self.config,
+            voice_packs=self.voice_packs,
+            scanner=self.sentence_bank_scanner,
+            known_words=self.store.known_words,
+            thread_pool=self.thread_pool,
+            parent=self,
+        )
+        dlg.mine_item_requested.connect(self._mine_sentence_bank_item)
+        dlg.mark_known_requested.connect(self._mark_bank_word_known)
+        dlg.exec()
+
+    def _mark_bank_word_known(self, lemma: str) -> None:
+        if lemma:
+            self.store.known_words.add(lemma)
+            if self._current_record is not None:
+                self._retokenize_current()
+            self.statusBar().showMessage(f"✓ 已將「{lemma}」標記為已知詞", 3000)
+
+    def _mine_sentence_bank_item(self, item: SentenceBankItem) -> None:
+        analysis = self.grammar_engine.analyze(item.tokenized)
+        rec = SentenceRecord(
+            record_id=-1,
+            raw_text=item.clean_text,
+            tokenized=item.tokenized,
+            timestamp=time.time(),
+            source="voice_pack",
+            media_title=item.pack_name or self.config.current_game_name,
+            grammar_analysis=analysis,
+            pack_translation=item.translation,
+        )
+        if item.voice_ids:
+            clip = self.voice_packs.extract_single_line_mp3(item.pack_id, item.voice_ids)
+            if clip is not None:
+                rec.audio_clip = clip
+                rec.audio_source = "voice_pack"
+            else:
+                rec.audio_source = "silent"
+        else:
+            rec.audio_source = "silent"
+        self._mine_record_token(rec, item.target_token)
 
     def _on_voice_packs_changed(self) -> None:
         if self.config.active_voice_pack_id:
@@ -1578,6 +1726,7 @@ class MainWindow(QMainWindow):
             self._display_record(self._current_record)
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        self._closing = True
         self.hook_manager.detach()
         self.mpv_bridge.stop()
         self.overlay.shutdown_window_pin()

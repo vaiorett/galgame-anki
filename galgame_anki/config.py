@@ -71,6 +71,10 @@ class AppConfig:
     capture_screenshot_on_mine: bool = True
     quick_forge_before_mine: bool = True
     active_voice_pack_id: str = ""                # 可手動指定目前優先使用的人聲索引包（空字串＝自動依遊戲配對）
+    # mpv 動畫進階沉浸（sub-transition 無字幕自動倍速 ＋ 精讀句尾暫停）
+    mpv_auto_speedup: bool = False
+    mpv_fast_speed: float = 2.0
+    mpv_auto_pause_sub_end: bool = False
 
     # 輕量二次元 UI 與電影級固定覆蓋層
     ui_theme: str = "sakura"  # sakura (櫻霧輕透) | starlight (星夜琉璃)

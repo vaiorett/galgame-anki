@@ -44,9 +44,11 @@ galgame_anki/
 │   ├── learning_progress.py # SQLite 實戰語法解鎖進度
 │   ├── hook_cleaner.py      # Textractor 漸進前綴重繪與重複字元清理
 │   ├── anki_client.py       # AnkiConnect 客戶端 + Anki 26 collection.anki2 FSRS 偵測
-│   ├── anki_templates.py    # Refold 三階段原生主題 Anki 卡片模板
-│   ├── voice_pack.py        # 遊戲解包台詞↔純淨人聲 SQLite 索引（~/.local/share/galgame-anki/voice_packs.db）、游標防撞車與 FFmpeg 合聲混音
-│   └── sentence_store.py    # 近期 50 句歷史與音畫快取
+│   ├── anki_templates.py    # Refold 三階段原生主題 Anki 卡片模板（含 PitchGraph SVG 與舊卡自動補繪）
+│   ├── pitch_accent.py      # 東京式モーラ拆解、四型分類（平板/頭高/中高/尾高）與 Inline SVG 音調曲線產生器
+│   ├── voice_pack.py        # 遊戲解包台詞↔純淨人聲 SQLite 索引、角色嚴格分軌濃縮聽力 MP3+LRC 匯出
+│   ├── sentence_bank.py     # 1T 黃金句礦場兩階段高速掃描器（防劇透章節、角色過濾、JPDB 詞頻排序、覆蓋率統計）
+│   └── sentence_store.py    # 近期 50 句歷史、多句合併（含 mpv 時間軸擴展）與音畫快取
 ├── adapters/
 │   ├── hook_engine.py       # TextractorCLI 自動下載／32-64bit 注入／線程評分與去重
 │   ├── xp3_psb.py           # 純 Python Kirikiri XP3（含 CxEncryption）+ M2 PSB (.scn) 解析與 Formats.dat 本機快取
@@ -64,8 +66,10 @@ galgame_anki/
 │   ├── lookup_popup.py      # 主視窗詳情卡 & 覆蓋層 Yomitan 懸停浮窗（含多候選原形切換）
 │   ├── card_forge_dialog.py # 1 秒 Refold 精煉製卡確認窗（可點選核心釋義膠囊、試聽純人聲、CG 預覽）
 │   ├── blueprint_dialog.py  # N5→N1 系統化學習藍圖 & 30 秒詞典／活用／五十音速查表
-│   ├── media_bridge_dialog.py # mpv 本地動畫連線設定視窗
-│   ├── voice_pack_dialog.py   # 遊戲解包純淨人聲索引建立／匯出／即時試聽管理視窗
+│   ├── media_bridge_dialog.py # mpv 本地動畫連線、無字幕自動倍速（sub-transition）與精讀句尾暫停視窗
+│   ├── voice_pack_dialog.py   # 遊戲解包純淨人聲索引、角色分類濃縮聽力 MP3 獨立分檔匯出與即時試聽
+│   ├── sentence_bank_dialog.py # 💎 1T 黃金句礦場（Sentence Bank）篩選、試聽與一鍵精煉收錄視窗
+│   ├── pitch_widget.py        # 原生 QPainter HiDPI 高低音調曲線視覺化元件
 │   ├── extra_dialogs.py     # 詞典管理（勾選啟用、上下排序、預設模式）＆ 難度避雷指南
 │   ├── hook_dialog.py       # Hook 線程／特殊碼／日誌管理
 │   ├── setup_wizard.py      # 一鍵初始化精靈

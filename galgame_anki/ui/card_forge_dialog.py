@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
 from galgame_anki.adapters.media_utils import play_mp3_bytes_async
 from galgame_anki.core.context_meaning import rank_senses_by_context
 from galgame_anki.core.grammar_engine import translate_sentence_free
+from galgame_anki.ui.pitch_widget import PitchGraphWidget
 from galgame_anki.ui.workers import FunctionWorker
 
 
@@ -158,14 +159,16 @@ class CardForgeDialog(QDialog):
         row_word.addWidget(QLabel("讀音："))
         self.reading_edit = QLineEdit(target_reading)
         self.reading_edit.setMaximumWidth(170)
+        self.reading_edit.textChanged.connect(self._refresh_pitch_graph)
         row_word.addWidget(self.reading_edit)
 
-        if self._pitch_accent:
-            p_lbl = QLabel(f"音調 [{self._pitch_accent}]")
-            p_lbl.setObjectName("PillInfo")
-            row_word.addWidget(p_lbl)
+        parent_theme = getattr(getattr(self.parent(), "config", None), "ui_theme", "sakura")
+        self._dark_mode = parent_theme == "starlight"
+        self.pitch_widget = PitchGraphWidget(compact=True, dark_mode=self._dark_mode)
+        row_word.addWidget(self.pitch_widget)
         row_word.addStretch()
         sl.addLayout(row_word)
+        self._refresh_pitch_graph()
 
         # 若詞形有多個候選原形（如 あった -> ある / 会う / 合う），支援 1 秒直接切換！
         if self._alt_lemmas:
@@ -386,9 +389,14 @@ class CardForgeDialog(QDialog):
         self._workers.append(worker)
         self._thread_pool.start(worker)
 
+    def _refresh_pitch_graph(self) -> None:
+        reading = self.reading_edit.text().strip() or self.word_edit.text().strip()
+        self.pitch_widget.set_pitch(reading, self._pitch_accent, dark_mode=self._dark_mode)
+
     def _apply_alt_lemma(self, lemma: str, reading: str, bi: str, mono: str) -> None:
         self.word_edit.setText(lemma)
         self.reading_edit.setText(reading)
+        self._refresh_pitch_graph()
         if bi:
             self.bi_edit.setPlainText(bi)
         self.mono_edit.setPlainText(mono)
