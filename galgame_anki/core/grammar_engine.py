@@ -976,8 +976,15 @@ class OfflineGrammarEngine:
         hits: list[GrammarHit] = []
         seen_ids: set[str] = set()
 
+        token_lessons = [lesson_for_token(tok) for tok in tokenized.tokens]
+        # 「本を読んだ」的「んだ」屬於動詞過去式。「読んだんだ」才在後面加了解釋語氣。
+        past_endings = {tok.end - 2 for tok, lesson in zip(tokenized.tokens, token_lessons)
+                        if lesson and lesson.form == "ta" and tok.surface.endswith("んだ")}
         for regex, pat in self._compiled:
-            m = regex.search(sentence)
+            if pat["id"] == "n5_noda" and past_endings:
+                m = next((hit for hit in regex.finditer(sentence) if hit.start() not in past_endings), None)
+            else:
+                m = regex.search(sentence)
             if m and pat["id"] not in seen_ids:
                 seen_ids.add(pat["id"])
                 hits.append(
@@ -1012,8 +1019,7 @@ class OfflineGrammarEngine:
         conj_notes: list[str] = []
         seen_c: set[str] = set()
         lessons: list[VerbLesson] = []
-        for tok in tokenized.tokens:
-            lesson = lesson_for_token(tok)
+        for tok, lesson in zip(tokenized.tokens, token_lessons):
             if lesson:
                 if lesson not in lessons:
                     lessons.append(lesson)

@@ -12,7 +12,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from galgame_anki.core.verb_lesson import FORMS, build_lesson, verb_group
+from galgame_anki.core.verb_lesson import FORMS, build_lesson, spoken_surfaces, verb_group
 from galgame_anki.core.context_meaning import is_otherwise_clause
 from galgame_anki.core.dictionary import DictionaryEngine, LookupMatch
 from galgame_anki.core.hook_cleaner import clean_galgame_hook_text
@@ -492,6 +492,25 @@ class JapaneseTokenizer:
         m_len = len(pass1)
         while i < m_len:
             node = dict(pass1[i])
+            if node["pos0"] == "動詞" and node["pos1"] == "自立":
+                group = verb_group(node["base"], node["verb_type"])
+                forms = spoken_surfaces(node["base"], group)
+                best = None
+                for j in range(i, m_len):
+                    if j > i and pass1[j]["start"] != pass1[j - 1]["end"]:
+                        break
+                    candidate = sentence[node["start"]:pass1[j]["end"]]
+                    if not any(word.startswith(candidate) for word in forms):
+                        break
+                    if candidate in forms:
+                        best = j
+                if best is not None:
+                    node["end"] = pass1[best]["end"]
+                    node["surface"] = sentence[node["start"]:node["end"]]
+                    node["spoken"] = True
+                    merged.append(node)
+                    i = best + 1
+                    continue
             if node["pos0"] in ("動詞", "形容詞") and node["pos1"] == "自立":
                 j = i + 1
                 while j < m_len:
@@ -573,10 +592,10 @@ class JapaneseTokenizer:
             pass_lemma = "" if (base_hint.endswith("える") or base_hint.endswith("げる") or base_hint.endswith("ける")) and surface != base_hint else base_hint
 
             lookup = self.dictionary.lookup_exact_or_deinflect(
-                surface,
+                base_hint if nd.get("spoken") else surface,
                 pos_hint=pos_hint,
                 reading_hint=pass_rd,
-                lemma_hint=pass_lemma,
+                lemma_hint=base_hint if nd.get("spoken") else pass_lemma,
             )
             if lookup is None and base_hint and base_hint != surface:
                 lookup = self.dictionary.lookup_exact_or_deinflect(

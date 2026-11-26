@@ -227,7 +227,7 @@ class TestSingleScreenUX(unittest.TestCase):
             win.mpv_bridge.stop()
             self.addCleanup(win.close)
             tool_labels = [a.text().split("\t")[0] for a in win.more_menu.actions() if not a.isSeparator()]
-            self.assertIn("語法技能樹", tool_labels)
+            self.assertIn("語法與詞彙地圖", tool_labels)
             self.assertIn("1T 句庫挖礦", tool_labels)
             self.assertIn("純人聲解包", tool_labels)
             self.assertIn("角色聽力匯出", tool_labels)

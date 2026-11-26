@@ -131,23 +131,28 @@ class TestOverlayPositionAndContext(unittest.TestCase):
         self.assertLess(touched, 22)
         self.assertEqual(area.pixelColor(0, 0).alpha(), 0)
 
-    def test_kwin_hides_only_moving_overlay_and_restores_its_opacity(self):
+    def test_kwin_keeps_live_overlay_visible_at_every_drag_position(self):
         js = QJSEngine()
         js.evaluate("""
-            function signal() { return {connect(fn){ this.fire = fn; }}; }
+            function signal() { return {fire(){}, connect(fn){ this.fire = fn; }}; }
             function windowStub(caption) {
                 return {caption, opacity: 0.83, move: false,
+                        frameGeometry: {x: 0, y: 0, width: 320, height: 90}, frameGeometryChanged: signal(),
                         interactiveMoveResizeStarted: signal(), interactiveMoveResizeFinished: signal()};
             }
             var overlay = windowStub("GalAnki 覆蓋層"), player = windowStub("mpv");
             var workspace = {windowList: () => [overlay, player]};
         """)
-        script = js.evaluate(build_kwin_pin_script())
+        script = js.evaluate(build_kwin_pin_script() + "\nworkspace.savedX = () => savedOverlayGeom.x;")
         self.assertFalse(script.isError(), script.toString())
         js.evaluate("overlay.interactiveMoveResizeStarted.fire()")
         self.assertAlmostEqual(js.evaluate("overlay.opacity").toNumber(), 0.83)
         js.evaluate("overlay.move = player.move = true; overlay.interactiveMoveResizeStarted.fire(); player.interactiveMoveResizeStarted.fire()")
-        self.assertEqual(js.evaluate("overlay.opacity").toNumber(), 0)
+        for x in (25, 80, 103):
+            update = js.evaluate(f"overlay.frameGeometry.x = {x}; overlay.frameGeometryChanged.fire()")
+            self.assertFalse(update.isError(), update.toString())
+            self.assertAlmostEqual(js.evaluate("overlay.opacity").toNumber(), 0.83)
+            self.assertEqual(js.evaluate("workspace.savedX()").toInt(), x)
         self.assertAlmostEqual(js.evaluate("player.opacity").toNumber(), 0.83)
         js.evaluate("overlay.interactiveMoveResizeStarted.fire(); overlay.move = false; overlay.interactiveMoveResizeFinished.fire()")
         self.assertAlmostEqual(js.evaluate("overlay.opacity").toNumber(), 0.83)

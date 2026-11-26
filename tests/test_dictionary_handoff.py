@@ -515,11 +515,77 @@ class TestDictionaryHandoff(unittest.TestCase):
         eng.set_dictionary_enabled(d_after_ok["id"], True)
         self.assertEqual(eng.lookup_exact_or_deinflect("旧詞").best_concise_meaning("bilingual"), "新版釋義")
 
+    def test_phrase_ending_in_spoken_contraction(self) -> None:
+        line = "先輩に気を遣ってたんだよ。"
+        parsed = self.tokenizer.tokenize(line)
+        verb = next(t for t in parsed.tokens if t.surface == "遣ってたんだ")
+        phrase = find_phrase_for_token(line, parsed.tokens, verb, self.engine)
+        self.assertIsNotNone(phrase)
+        self.assertEqual((phrase.surface, phrase.lookup.lemma), ("気を遣ってたんだ", "気を遣う"))
+
+    def test_in_app_dictionary_switch_and_retry(self) -> None:
+        from types import SimpleNamespace
+        from PySide6.QtCore import QObject, Signal
+        from PySide6.QtNetwork import QNetworkReply
+        from PySide6.QtWidgets import QComboBox, QDialog, QLabel, QWidget
+        from galgame_anki.ui.web_dictionary import show_web_dictionary
+
+        class View(QWidget):
+            loadFinished = Signal(bool)
+            def setPage(self, page):
+                self._page = page
+            def load(self, url):
+                requests.append(url)
+
+        class Reply(QObject):
+            finished = Signal()
+            def error(self):
+                return QNetworkReply.NetworkError.NoError
+            def readAll(self):
+                return "<h2>日中辞典 第3版の解説</h2><p>壊れる</p><p>損壞</p><p>出典　小學館</p>".encode()
+            def abort(self):
+                self.finished.emit()
+
+        requests = []
+        pending = []
+        def get(request):
+            requests.append(request.url())
+            pending.append(Reply())
+            return pending[-1]
+
+        owner = QWidget()
+        self.addCleanup(owner.close)
+        modules = {"PySide6.QtWebEngineCore": SimpleNamespace(QWebEnginePage=QObject),
+                   "PySide6.QtWebEngineWidgets": SimpleNamespace(QWebEngineView=View)}
+        with patch.dict("sys.modules", modules), patch("PySide6.QtNetwork.QNetworkAccessManager.get", side_effect=get):
+            show_web_dictionary("壊れる", owner, "kotobank")
+            dialog = owner.findChild(QDialog)
+            switch = dialog.findChild(QComboBox)
+            self.assertEqual(requests[-1].path(), "/jazhword/壊れる")
+            pending[0].finished.emit()
+            self.assertIn("損壞", dialog.reader.toPlainText())
+            self.assertNotIn("出典", dialog.reader.toPlainText())
+            dialog.original.click()
+            view = dialog.findChild(View)
+            view.loadFinished.emit(False)
+            self.assertTrue(any("未能載入" in s.text() and s.isVisible()
+                                for s in dialog.findChildren(QLabel)))
+            for source, host in (("sigure", "www.sigure.tw"), ("japandict", "www.japandict.com"),
+                                 ("jisho", "jisho.org"), ("kotobank_ja", "kotobank.jp")):
+                switch.setCurrentIndex(switch.findData(source))
+                self.assertEqual(requests[-1].host(), host)
+                self.assertTrue(requests[-1].path().endswith("壊れる"))
+            next(b for b in dialog.findChildren(QPushButton) if b.text() == "重試").click()
+            self.assertEqual(requests[-1], requests[-2])
+            self.assertEqual(len(requests), 7)
+            view.loadFinished.emit(True)
+            dialog.close()
+
     def test_offline_hover_toggle_rapid_sub_switch_and_ondemand_web_lookup(self) -> None:
         """驗收：斷網下懸停／快速換句／語塊切換與按需網頁查證（絕不於懸停自動開網頁）。"""
         self.assertEqual(
             build_web_lookup_url("kotobank", "腰を折る"),
-            "https://kotobank.jp/gs/?q=%E8%85%B0%E3%82%92%E6%8A%98%E3%82%8B",
+            "https://kotobank.jp/jazhword/%E8%85%B0%E3%82%92%E6%8A%98%E3%82%8B",
         )
         self.assertEqual(
             build_web_lookup_url("jisho", "気を遣う"),
@@ -575,7 +641,13 @@ class TestDictionaryHandoff(unittest.TestCase):
             opened = panel.open_web_lookup("kotobank")
             self.assertIn("%E6%B0%97%E3%82%92%E9%81%A3%E3%81%86", opened)
             self.assertNotIn("%E5%85%88%E8%BC%A9", opened)
-            open_url.assert_called_once_with(opened, panel)
+            open_url.assert_called_once_with("気を遣う", panel, "kotobank")
+            open_url.reset_mock()
+            overlay.popup.web_btn.click()
+            open_url.assert_called_once_with("気を遣う", overlay, "kotobank")
+            overlay.popup._toggle_phrase_mode(False)
+            overlay.popup.web_btn.click()
+            open_url.assert_called_with("遣う", overlay, "kotobank")
 
             # 詞典管理視窗日英備援切換器煙霧測試
             from PySide6.QtCore import QThreadPool

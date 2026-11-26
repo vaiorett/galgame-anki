@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from html import escape
 import re
 
@@ -30,6 +31,23 @@ FORMS = {
     "tero": ("要求對方繼續", "てろ／でろ", "「〜ていろ」口語常省掉「い」。說話者命令對方繼續做某事，或維持目前的狀態，語氣強硬。"),
     "teiru": ("說動作或狀態持續", "ている", "先接成て形，再接「いる」。可描述正在做的事，也可描述動作留下的狀態。"),
 }
+# 完整詞尾、以「て／で」接續後的兩種縮寫、句中作用。なきゃ 以否定形為基礎。
+SPOKEN_ENDINGS = {
+    "teru": ("ている", "てる", "でる", "動作正在進行，或先前動作造成的狀態仍在持續。"),
+    "teta": ("ていた", "てた", "でた", "把時間拉回先前：當時正在做，或當時仍是那個狀態。"),
+    "tenai": ("ていない", "てない", "でない", "當前沒有在做，或到目前為止還沒做。"),
+    "tenda": ("ているのだ", "てんだ", "でんだ", "把持續中的動作當作解釋；搭配疑問詞時，常帶有追問的語氣。"),
+    "tetanda": ("ていたのだ", "てたんだ", "でたんだ", "用先前正在做的事解釋眼前情況。"),
+    "chau": ("てしまう", "ちゃう", "じゃう", "表示把動作做完，也可能帶有『不小心、偏偏』的心情。"),
+    "chatta": ("てしまった", "ちゃった", "じゃった", "事情已經做完或發生了；是否有懊惱，要看上下文。"),
+    "toku": ("ておく", "とく", "どく", "先做某事，讓之後用得上，或讓結果保持下去。"),
+    "toite": ("ておいて", "といて", "どいて", "先做好或讓狀態保持下去；用在句末時常是在請對方這麼做。"),
+    "chadame": ("てはだめ", "ちゃだめ", "じゃだめ", "禁止前面的動作，意思是『不能這麼做』。"),
+    "nakya": ("なければ", "なきゃ", "なきゃ", "意思是『如果不……』。句末省略後半句時，常暗示『得去做』。"),
+}
+FORMS.update({key: (short + " 的用法", full + " → " + short, meaning)
+              for key, (full, short, _voiced, meaning) in SPOKEN_ENDINGS.items()})
+
 # 五段動詞的 あ段、い段與て形接尾（濁音時為で）
 ROWS = {
     "う": ("わ", "い", "って"), "つ": ("た", "ち", "って"), "る": ("ら", "り", "って"),
@@ -47,6 +65,7 @@ class VerbLesson:
     old: str
     new: str
     rule: str
+    expanded: str = ""
 
     @property
     def surface(self) -> str:
@@ -56,7 +75,9 @@ class VerbLesson:
         # 使用底線及粗體標記改動；Qt 與 Anki 直接繼承各自主題的文字色。
         fixed, old, new = map(escape, (self.fixed, self.old, self.new))
         columns = [("詞典裡", f"{fixed}<u>{old}</u>")]
-        if self.form in ("teiru", "tero", "tara"):
+        if self.expanded:
+            columns.append(("省略前", escape(self.expanded)))
+        elif self.form in ("teiru", "tero", "tara"):
             suffix = {"teiru": "いる", "tero": "ろ", "tara": "ら"}[self.form]
             step = "先變成た形" if self.form == "tara" else "先接動作"
             columns.append((step, f"{fixed}<u>{escape(self.new.removesuffix(suffix))}</u>"))
@@ -72,6 +93,21 @@ class VerbLesson:
 def build_lesson(lemma: str, group: str, form: str) -> VerbLesson | None:
     if not lemma or form not in FORMS:
         return None
+    if form in SPOKEN_ENDINGS:
+        negative = form == "nakya"
+        base = build_lesson(lemma, group, "nai" if negative else "te")
+        if base is None:
+            return None
+        full, short, voiced, _ = SPOKEN_ENDINGS[form]
+        if negative:
+            stem = base.new.removesuffix("ない")
+        else:
+            stem = base.new[:-1]
+            if base.new.endswith("で"):
+                full, short = "で" + full[1:], voiced
+        expanded = base.fixed + stem + full
+        rule = f"口語把「{full}」說成「{short}」。"
+        return VerbLesson(lemma, group, form, base.fixed, base.old, stem + short, rule, expanded)
     old, fixed = lemma[-1], lemma[:-1]
     if group in ("vs", "vk"):
         if group == "vs" and lemma.endswith("する"):
@@ -117,6 +153,12 @@ def build_lesson(lemma: str, group: str, form: str) -> VerbLesson | None:
         rule += " 加上「ら」後，整個形式表示條件。"
     new = {"te": te, "ta": ta, "tara": ta + "ら", "nai": nai, "masu": masu, "tai": tai, "teiru": te + "いる", "tero": te + "ろ"}[form]
     return VerbLesson(lemma, group, form, fixed, old, new, rule)
+
+
+@lru_cache(maxsize=2048)
+def spoken_surfaces(lemma: str, group: str) -> frozenset[str]:
+    return frozenset(lesson.surface for form in SPOKEN_ENDINGS
+                     if (lesson := build_lesson(lemma, group, form)))
 
 
 def verb_group(lemma: str, pos: str) -> str:

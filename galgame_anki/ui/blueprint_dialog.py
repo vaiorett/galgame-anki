@@ -6,6 +6,7 @@ import html
 from typing import Any
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -26,6 +27,8 @@ from PySide6.QtWidgets import (
 
 from galgame_anki.core.grammar_engine import OfflineGrammarEngine
 from galgame_anki.core.learning_progress import LearningProgressStore
+from galgame_anki.ui.japanese_reference import JapaneseReference
+from galgame_anki.ui.study_map import StudyMap
 from galgame_anki.ui.verb_explorer import VerbExplorer
 from galgame_anki.ui.theme import get_palette
 
@@ -45,7 +48,7 @@ class LearningBlueprintDialog(QDialog):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("語法技能樹（N5 → N1 · 口語實戰）")
+        self.setWindowTitle("語法與詞彙地圖")
         self.resize(840, 600)
 
         self.grammar = grammar
@@ -64,7 +67,7 @@ class LearningBlueprintDialog(QDialog):
         """跳轉並選取指定語法句型（從「句型拆解」卡片點擊進入時使用）。"""
         if not pattern_id:
             return False
-        self.tabs.setCurrentIndex(0)
+        self.tabs.setCurrentWidget(self.grammar_tab)
         self.level_filter.setCurrentIndex(0)
         self.domain_filter.setCurrentIndex(0)
         self.search_edit.clear()
@@ -83,7 +86,18 @@ class LearningBlueprintDialog(QDialog):
         layout.setSpacing(10)
 
         self.tabs = QTabWidget()
-        self.tabs.addTab(self._build_grammar_tab(), "技能樹")
+        self.study_map = StudyMap(self.progress_store, self.theme_name)
+        self.tabs.addTab(self.study_map, "知識地圖")
+        self.study_map.pattern_requested.connect(self.select_pattern)
+        self.grammar_tab = self._build_grammar_tab()
+        self.tabs.addTab(self.grammar_tab, "句型索引")
+        self.reference = JapaneseReference(self.grammar, self.theme_name)
+        self.tabs.addTab(self.reference, "日語總索引")
+        self.reference_shortcut = QShortcut(QKeySequence.StandardKey.Find, self)
+        self.reference_shortcut.activated.connect(self.find_reference)
+        self.study_map.reference_requested.connect(self.find_reference)
+        self.reference.pattern_requested.connect(self.select_pattern)
+        self.reference.lesson_requested.connect(self._open_concept)
         self.tabs.addTab(self._build_overview_tab(), "學習總覽")
         self.tabs.addTab(self._build_cheatsheet_tab(), "上手與速查")
         self.verb_explorer = VerbExplorer(self.theme_name)
@@ -97,6 +111,17 @@ class LearningBlueprintDialog(QDialog):
         close_btn.clicked.connect(self.accept)
         bottom.addWidget(close_btn)
         layout.addLayout(bottom)
+
+    def find_reference(self, query=None):
+        self.tabs.setCurrentWidget(self.reference)
+        if query is not None:
+            self.reference.search.setText(query)
+        self.reference.search.setFocus()
+        self.reference.search.selectAll()
+
+    def _open_concept(self, key):
+        self.study_map.select(key)
+        self.tabs.setCurrentWidget(self.study_map)
 
     def _build_grammar_tab(self) -> QWidget:
         tab = QWidget()

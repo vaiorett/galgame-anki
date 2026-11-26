@@ -53,6 +53,38 @@ class TestVisualLearning(unittest.TestCase):
         self.assertIsNone(lesson_for_token(invalid))
         self.assertIsNone(lesson_for_token(Token("ホテル", "ホテル", "", 0, 3), preview=True))
 
+    def test_explanation_vs_voiced_past(self):
+        for line, expected in (("本を読んだ。", False), ("本を読んだんだよ。", True),
+                               ("待ってたんだね。", True)):
+            with self.subTest(line=line):
+                analysis = self.grammar.analyze(self.tokenizer.tokenize(line))
+                self.assertEqual(any(hit.pattern_id == "n5_noda" for hit in analysis.grammar_hits), expected)
+
+    def test_spoken_forms_in_dialogue(self):
+        for line, surface, lemma, full in (
+            ("何してるの？", "してる", "する", "している"),
+            ("息を殺して待ってた。", "待ってた", "待つ", "待っていた"),
+            ("もう食べちゃった。", "食べちゃった", "食べる", "食べてしまった"),
+            ("遊んじゃった。", "遊んじゃった", "遊ぶ", "遊んでしまった"),
+            ("先に読んどいて。", "読んどいて", "読む", "読んでおいて"),
+            ("何やってんだよ。", "やってんだ", "やる", "やっているのだ"),
+            ("ずっと待ってたんだよ。", "待ってたんだ", "待つ", "待っていたのだ"),
+            ("もう行かなきゃ。", "行かなきゃ", "行く", "行かなければ"),
+            ("それ、飲んじゃだめ。", "飲んじゃだめ", "飲む", "飲んではだめ"),
+        ):
+            with self.subTest(line=line):
+                tokens = self.tokenizer.tokenize(line).tokens
+                self.assertEqual("".join(t.surface for t in tokens), line)
+                target = next(t for t in tokens if t.surface == surface)
+                self.assertEqual(line[target.start:target.end], surface)
+                self.assertEqual(target.lemma, lemma)
+                lesson = lesson_for_token(target)
+                self.assertEqual(lesson.expanded, full)
+                explorer = VerbExplorer("starlight")
+                explorer.select_lesson(lesson)
+                self.assertIn(full, explorer.page.toPlainText())
+                explorer.close()
+
     def test_hover_fullscreen_keeps_input_for_player_and_mouse_for_popup(self):
         window = OverlayWindow("starlight", self.grammar)
         self.addCleanup(window.close)
@@ -77,7 +109,7 @@ class TestVisualLearning(unittest.TestCase):
         self.assertIs(self.app.focusWindow(), player.windowHandle())
         self.assertIs(popup.parentWidget(), window)
         self.assertIn("台詞裡", popup.form_label.text())
-        self.assertEqual(popup.findChildren(QPushButton), [popup.mine_btn, popup.audio_btn, popup.prompt_btn])
+        self.assertEqual(popup.findChildren(QPushButton), [popup.web_btn, popup.mine_btn, popup.audio_btn, popup.prompt_btn])
         received = []
         popup.audio_preview_requested.connect(lambda: received.append(True))
         QTest.mouseClick(popup.audio_btn, Qt.MouseButton.LeftButton)

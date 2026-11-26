@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from galgame_anki.core.deinflector import RULE_NONE, deinflect, pos_matches_rule
 from galgame_anki.core.dictionary import (
@@ -14,6 +14,7 @@ from galgame_anki.core.dictionary import (
     is_katakana_loanword,
 )
 from galgame_anki.core.tokenizer import Token
+from galgame_anki.core.verb_lesson import spoken_surfaces, verb_group
 
 # 不作為多詞語塊開頭或結尾的純語氣／格助詞（保留結尾「に」供「さすがに」「本当に」等副詞語塊）
 _BAD_EDGE_START = frozenset({"は", "が", "を", "の", "に", "で", "へ", "と", "も", "よ", "ね", "ぞ", "わ", "か", "だ", "です"})
@@ -152,6 +153,12 @@ def find_phrase_for_token(
     cand_spans: list[tuple[int, int, str, str, str]] = []
     probe_keys: set[str] = set()
 
+    spoken_lemmas = {}
+    for j in range(left_bound + 1, right_bound + 1):
+        tail = tokens[j]
+        if tail.verb_type and tail.surface in spoken_surfaces(tail.lemma, verb_group(tail.lemma, tail.verb_type)):
+            spoken_lemmas[j] = tail.lemma
+
     for i in range(left_bound, idx + 1):
         first_surf = tokens[i].surface
         if first_surf in _BAD_EDGE_START:
@@ -173,6 +180,8 @@ def find_phrase_for_token(
             prefix = sentence[start_pos : tokens[j].start]
             cand_spans.append((i, j, span, prefix, last_surf))
             probe_keys.add(span)
+            if j in spoken_lemmas:
+                probe_keys.add(prefix + spoken_lemmas[j])
             for dc in deinflect(last_surf):
                 if dc.rules != RULE_NONE and dc.term != last_surf:
                     probe_keys.add(prefix + dc.term)
@@ -193,6 +202,12 @@ def find_phrase_for_token(
 
     for i, j, span, prefix, last_surf in cand_spans:
         match = _lookup_inflected_phrase(span, prefix, last_surf, dictionary, hit_terms)
+        if match is None and j in spoken_lemmas:
+            headword = prefix + spoken_lemmas[j]
+            if headword in hit_terms:
+                base = dictionary.lookup_exact_or_deinflect(headword)
+                if base and base.lemma == headword and _has_usable_sense(base):
+                    match = replace(base, surface=span)
         if match is None:
             continue
         # 避免把純「副詞/連體詞+名詞」誤收；優先有明確詞性與讀音的完整詞條

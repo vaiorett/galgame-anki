@@ -10,7 +10,6 @@ from PySide6.QtCore import QPoint, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QAction, QGuiApplication, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
-    QButtonGroup,
     QComboBox,
     QFileDialog,
     QFrame,
@@ -222,21 +221,17 @@ class MainWindow(QMainWindow):
         tl.addSpacing(2)
 
         # 3. 階段切換
-        self.stage_group = QButtonGroup(self)
-        self.stage_buttons: dict[str, QPushButton] = {}
-        for mode_id, label, tip in [
-            ("lv1", "Lv.1", "假名輔助 + 雙語"),
-            ("lv2", "Lv.2", "1T 高亮 + 雙語"),
-            ("lv3", "Lv.3", "日日單語優先"),
-        ]:
-            btn = QPushButton(label)
-            btn.setObjectName("StageBtn")
-            btn.setToolTip(tip)
-            btn.setCheckable(True)
-            btn.clicked.connect(lambda _c=False, m=mode_id: self._set_stage_mode(m))
-            self.stage_group.addButton(btn)
-            self.stage_buttons[mode_id] = btn
-            tl.addWidget(btn)
+        self.stage_selector = QComboBox()
+        self.stage_selector.setAccessibleName("字幕閱讀輔助")
+        self.stage_selector.setToolTip("選擇字幕的讀音和詞典提示（Ctrl+1／2／3）")
+        for mode, label in (("lv1", "假名＋雙語"), ("lv2", "生詞＋雙語"), ("lv3", "日日釋義")):
+            self.stage_selector.addItem(label, mode)
+        self.stage_selector.activated.connect(lambda index: self._set_stage_mode(self.stage_selector.itemData(index)))
+        tl.addWidget(self.stage_selector)
+        self.map_btn = QPushButton("學習地圖")
+        self.map_btn.setToolTip("從目前選詞查看語法、詞彙和我的例句（Ctrl+B）")
+        self.map_btn.clicked.connect(self._open_current_map)
+        tl.addWidget(self.map_btn)
 
         tl.addStretch()
 
@@ -376,6 +371,8 @@ class MainWindow(QMainWindow):
         self.lookup_panel.blueprint_requested.connect(self.open_learning_blueprint)
         self.overlay.popup.lesson_requested.connect(self._open_verb_lesson)
         self.lookup_panel.lesson_requested.connect(self._open_verb_lesson)
+        self.lookup_panel.study_link.requested.connect(self._open_study_focus)
+        self.overlay.popup.study_link.requested.connect(self._open_study_focus)
         left_layout.addWidget(self.lookup_panel, 1)
 
         self.splitter.addWidget(left_col)
@@ -449,7 +446,7 @@ class MainWindow(QMainWindow):
         self.more_menu.clear()
 
         # 學習
-        act_bp = QAction("語法技能樹\tCtrl+B", self)
+        act_bp = QAction("語法與詞彙地圖\tCtrl+B", self)
         act_bp.triggered.connect(self.open_learning_blueprint)
         self.more_menu.addAction(act_bp)
 
@@ -569,7 +566,7 @@ class MainWindow(QMainWindow):
 
         tools_sub = menu.addMenu("工具")
         for label, cb in [
-            ("語法技能樹", self.open_learning_blueprint),
+            ("語法與詞彙地圖", self.open_learning_blueprint),
             ("1T 句庫挖礦", self.open_sentence_bank),
             ("純人聲解包", lambda: self.open_voice_pack_manager(initial_tab=0)),
             ("角色聽力匯出", lambda: self.open_voice_pack_manager(initial_tab=1)),
@@ -652,7 +649,7 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+P"), self, activated=self._preview_current_audio)
         QShortcut(QKeySequence("Ctrl+J"), self, activated=self._merge_previous_sentence)
         QShortcut(QKeySequence("Ctrl+Shift+M"), self, activated=self.open_sentence_bank)
-        QShortcut(QKeySequence("Ctrl+B"), self, activated=self.open_learning_blueprint)
+        QShortcut(QKeySequence("Ctrl+B"), self, activated=self._open_current_map)
         QShortcut(QKeySequence("Ctrl+Q"), self, activated=self.quit_application)
         QShortcut(QKeySequence("Ctrl+1"), self, activated=lambda: self._set_stage_mode("lv1"))
         QShortcut(QKeySequence("Ctrl+2"), self, activated=lambda: self._set_stage_mode("lv2"))
@@ -720,8 +717,7 @@ class MainWindow(QMainWindow):
 
     def _apply_stage_ui(self) -> None:
         mode = self.config.stage_mode
-        if mode in self.stage_buttons:
-            self.stage_buttons[mode].setChecked(True)
+        self.stage_selector.setCurrentIndex(self.stage_selector.findData(mode))
 
         show_furi = mode == "lv1" and self.config.overlay_furigana_in_lv1
         self.sentence_widget.set_display_options(22, show_furi, theme_name=self.config.ui_theme)
@@ -1359,6 +1355,7 @@ class MainWindow(QMainWindow):
             sentence=record.raw_text if record else "",
             translation=(record.pack_translation or record.sentence_translation) if record else "",
             phrase_token=phrase_tok,
+            tokens=record.tokenized.tokens if record else (),
         )
         # 離線即時展開「🌳 聯想記憶樹」（同漢字詞族・常用複合・自他/同音易混・本作品重現）
         req_id = getattr(self, "_assoc_req_id", 0) + 1
@@ -1970,20 +1967,37 @@ class MainWindow(QMainWindow):
         self.overlay.popup.hide()
         self.open_learning_blueprint(lesson=lesson)
 
-    def open_learning_blueprint(self, pattern_id: str = "", lesson: VerbLesson | None = None) -> None:
+    def _open_current_map(self):
+        link = self.lookup_panel.study_link
+        record = self._current_record
+        if self._selected_token and record and link.sentence == record.raw_text:
+            self._open_study_focus(link.focus, link.sentence, link.lemma)
+        else:
+            self.open_learning_blueprint()
+
+    def _open_study_focus(self, focus, sentence, lemma):
+        self.overlay.popup.hide()
+        self.open_learning_blueprint(study=(focus, sentence, lemma))
+
+    def open_learning_blueprint(self, pattern_id: str = "", lesson: VerbLesson | None = None, study=None) -> None:
         dlg = LearningBlueprintDialog(
             grammar=self.grammar_engine,
             progress_store=self.progress_store,
             known_words_count=len(self.store.known_words),
             stage_mode=self.config.stage_mode,
             theme_name=self.config.ui_theme,
-            parent=self,
+            parent=self if self.isVisible() or not self.overlay.isVisible() else self.overlay,
         )
-        if lesson is not None:
+        if study:
+            dlg.study_map.show_focus(*study)
+        elif lesson is not None:
             dlg.verb_explorer.select_lesson(lesson)
             dlg.tabs.setCurrentWidget(dlg.verb_explorer)
         elif isinstance(pattern_id, str) and pattern_id:
             dlg.select_pattern(pattern_id)
+        else:
+            dlg.tabs.setCurrentWidget(dlg.reference)
+            dlg.reference.search.setFocus()
         dlg.mine_grammar_requested.connect(self._mine_grammar_card)
         dlg.exec()
 

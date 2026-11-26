@@ -64,12 +64,14 @@ def main(argv: list[str] | None = None) -> int:
 
     from pathlib import Path
 
+    from PySide6.QtCore import Qt
     from PySide6.QtGui import QIcon
     from PySide6.QtWidgets import QApplication
 
     from galgame_anki.ui.main_window import MainWindow
     from galgame_anki.ui.theme import build_stylesheet
 
+    QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
     app = QApplication(sys.argv)
     app.setApplicationName("GalAnki")
     app.setDesktopFileName("galanki")

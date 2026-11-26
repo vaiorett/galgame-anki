@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from galgame_anki.core.study_map import CONCEPTS, focus_for
 from galgame_anki.core.verb_lesson import FORMS, VerbLesson, lesson_for_token
 from galgame_anki.core.context_meaning import context_gloss_is_chinese, explain_lookup_in_sentence
 from galgame_anki.core.dictionary import (
@@ -617,8 +618,33 @@ def _make_pattern_card(
 
 def _lesson_label(lesson: VerbLesson, link_color: str, preview: bool = False) -> str:
     heading = "試換一個詞尾" if preview else FORMS[lesson.form][0]
+    if lesson.expanded:
+        heading = FORMS[lesson.form][2]
     return (f"<b>{heading}</b>" + lesson.diagram("示範接法" if preview else "台詞裡") + html.escape(lesson.rule) +
             f'　<a href="compare" style="color:{link_color}">比較其他變法</a>')
+
+
+class StudyLink(QLabel):
+    requested = Signal(object, str, str)
+
+    def __init__(self):
+        super().__init__()
+        self.setWordWrap(True)
+        self.hide()
+        self.linkActivated.connect(self._open)
+
+    def bind(self, token, sentence, tokens, phrase, particle, translation, color):
+        self.focus = focus_for(token, tokens=tokens, phrase=phrase, particle=particle, sentence=sentence, translation=translation)
+        self.sentence, self.lemma = sentence, token.lemma
+        concept = CONCEPTS[self.focus.key]
+        collocation = self.focus.vocabulary
+        prefix = f"{html.escape(collocation)}　·　" if collocation not in (token.surface, token.lemma) and len(collocation) <= 22 else ""
+        self.setText(f'{prefix}<a style="color:{color}" href="map">逐步看懂「{concept.title}」</a>')
+        self.setToolTip(self.focus.evidence)
+        self.show()
+
+    def _open(self, _url):
+        self.requested.emit(self.focus, self.sentence, self.lemma)
 
 
 class LookupDetailPanel(QFrame):
@@ -701,6 +727,8 @@ class LookupDetailPanel(QFrame):
         self.trace_label.setWordWrap(True)
         self.trace_label.hide()
         self.trace_line.addWidget(self.trace_label, 1)
+        self.study_link = StudyLink()
+        self.trace_line.addWidget(self.study_link)
         self.pitch_button = QPushButton("音調")
         self.pitch_button.setObjectName("GhostBtn")
         self.pitch_button.setCheckable(True)
@@ -752,7 +780,7 @@ class LookupDetailPanel(QFrame):
         if not url:
             return ""
         self.web_lookup_requested.emit(site_id, query, url)
-        show_web_dictionary(url, self)
+        show_web_dictionary(query, self, site_id)
         return url
 
     def _toggle_phrase_mode(self, use_phrase: bool) -> None:
@@ -1157,7 +1185,9 @@ class LookupDetailPanel(QFrame):
         sentence: str = "",
         translation: str = "",
         phrase_token: Token | None = None,
+        tokens=(),
     ) -> None:
+        self._sentence_tokens = tokens
         self._single_token = token
         self._phrase_token = phrase_token
         self._showing_phrase = phrase_token is not None
@@ -1182,6 +1212,8 @@ class LookupDetailPanel(QFrame):
         translation: str,
     ) -> None:
         self._current_token = token
+        self.study_link.bind(token, sentence, self._sentence_tokens, self._showing_phrase, particle_info, translation,
+                             get_palette(self._theme_name).pill_info_fg)
         self.mine_btn.setEnabled(True)
         self.more_btn.setEnabled(True)
 
@@ -1389,6 +1421,10 @@ class OverlayLookupPopup(QFrame):
         top.addWidget(self.reading_label)
         top.addStretch()
 
+        self.web_btn = QPushButton("線上辭典")
+        self.web_btn.setToolTip("在 GalAnki 內查目前詞語的中文或英文解釋")
+        self.web_btn.clicked.connect(self._open_online_dictionary)
+        top.addWidget(self.web_btn)
         layout.addLayout(top)
 
         self.pitch_widget = PitchGraphWidget(
@@ -1405,6 +1441,8 @@ class OverlayLookupPopup(QFrame):
         self._lesson = None
         layout.addWidget(self.form_label)
 
+        self.study_link = StudyLink()
+        layout.addWidget(self.study_link)
         self.reason_label = QLabel("")
         self.reason_label.setWordWrap(True)
         layout.addWidget(self.reason_label)
@@ -1462,6 +1500,15 @@ class OverlayLookupPopup(QFrame):
         btn_row.addWidget(self.prompt_btn)
 
         layout.addLayout(btn_row)
+
+    def _open_online_dictionary(self) -> None:
+        if self._token is None:
+            return
+        token = self._token
+        query = (token.lookup.lemma if token.lookup else token.lemma) or token.surface
+        parent = self.parentWidget()
+        self.hide()
+        show_web_dictionary(query, parent, "kotobank")
 
     def reset_lookup_area(self) -> None:
         self.setFixedWidth(385)
@@ -1626,7 +1673,9 @@ class OverlayLookupPopup(QFrame):
         *,
         show: bool = True,
         phrase_token: Token | None = None,
+        tokens=(),
     ) -> None:
+        self._sentence_tokens = tokens
         self._single_token = token
         self._phrase_token = phrase_token
         self._showing_phrase = phrase_token is not None
@@ -1654,6 +1703,8 @@ class OverlayLookupPopup(QFrame):
         show: bool = True,
     ) -> None:
         self._token = token
+        self.study_link.bind(token, sentence, self._sentence_tokens, self._showing_phrase, particle_info, translation,
+                             get_palette(self._theme_name).pill_info_fg)
         match = token.lookup
         lemma = match.lemma if match else token.lemma
         reading = match.reading if match else token.reading

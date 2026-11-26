@@ -1293,6 +1293,7 @@ class OverlayWindow(QWidget):
             (record.pack_translation or record.sentence_translation) if record else "",
             show=False,
             phrase_token=phrase_tok,
+            tokens=record.tokenized.tokens if record else (),
         )
         if QGuiApplication.platformName().startswith("wayland"):
             self._show_wayland_lookup(anchor_top)

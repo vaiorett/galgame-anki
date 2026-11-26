@@ -37,6 +37,11 @@ class LearningProgressStore:
                 updated_at REAL NOT NULL DEFAULT 0
             );
 
+            CREATE TABLE IF NOT EXISTS study_examples (
+                topic TEXT NOT NULL, lemma TEXT NOT NULL, sentence TEXT NOT NULL,
+                excerpt TEXT NOT NULL, saved_at REAL NOT NULL,
+                PRIMARY KEY(topic, lemma, sentence)
+            );
             CREATE TABLE IF NOT EXISTS study_stats (
                 key TEXT PRIMARY KEY,
                 value INTEGER NOT NULL DEFAULT 0
@@ -44,6 +49,17 @@ class LearningProgressStore:
             """
         )
         self._conn.commit()
+
+    def keep_study_example(self, topic: str, lemma: str, sentence: str, excerpt: str):
+        with self._conn:
+            self._conn.execute("INSERT INTO study_examples VALUES (?, ?, ?, ?, ?) "
+                               "ON CONFLICT(topic, lemma, sentence) DO UPDATE SET "
+                               "excerpt=excluded.excerpt, saved_at=excluded.saved_at",
+                               (topic, lemma, sentence, excerpt, time.time()))
+
+    def study_examples(self, topic: str):
+        return self._conn.execute("SELECT lemma, sentence, excerpt FROM study_examples WHERE topic=? "
+                                  "ORDER BY saved_at DESC", (topic,)).fetchall()
 
     def record_sentence_seen(self, hits: list[GrammarHit], sentence: str, source_name: str = "") -> None:
         """每讀到一句台詞（Galgame / mpv），自動點亮對應語法節點並留存真實例句。"""

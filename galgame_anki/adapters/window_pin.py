@@ -279,23 +279,6 @@ function applyToWindow(w) {{
 function trackWindow(w) {{
     if (!w) return;
     applyToWindow(w);
-    // KWin 持有原生拖動的滑鼠抓取，放開或取消時均由合成器還原。
-    if (w.interactiveMoveResizeStarted && w.interactiveMoveResizeFinished) {{
-        let previousOpacity = null;
-        function beginMove() {{
-            if (w.caption !== OVERLAY_TITLE || !w.move || previousOpacity !== null) return;
-            previousOpacity = w.opacity;
-            w.opacity = 0;
-        }}
-        w.interactiveMoveResizeStarted.connect(beginMove);
-        w.interactiveMoveResizeFinished.connect(() => {{
-            if (previousOpacity !== null) {{
-                w.opacity = previousOpacity;
-                previousOpacity = null;
-            }}
-        }});
-        beginMove();
-    }}
     if (w.captionChanged) {{
         w.captionChanged.connect(() => applyToWindow(w));
     }}

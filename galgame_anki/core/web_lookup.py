@@ -5,8 +5,11 @@ from __future__ import annotations
 from urllib.parse import quote
 
 WEB_LOOKUP_SITES: tuple[tuple[str, str, str], ...] = (
-    ("kotobank", "コトバンク（大辞泉・日日）", "https://kotobank.jp/gs/?q={q}"),
-    ("jisho", "Jisho（日英對照）", "https://jisho.org/search/{q}"),
+    ("kotobank", "日中｜コトバンク・小學館", "https://kotobank.jp/jazhword/{q}"),
+    ("sigure", "日中｜時雨の町（繁中）", "https://www.sigure.tw/dict/jp/{q}"),
+    ("japandict", "日英｜JapanDict", "https://www.japandict.com/{q}"),
+    ("jisho", "日英｜Jisho", "https://jisho.org/search/{q}"),
+    ("kotobank_ja", "日日｜コトバンク", "https://kotobank.jp/word/{q}"),
 )
 
 _SITE_TEMPLATES: dict[str, str] = {site_id: tpl for site_id, _label, tpl in WEB_LOOKUP_SITES}
