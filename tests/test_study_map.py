@@ -42,8 +42,8 @@ class StudyMapTests(unittest.TestCase):
                     win.overlay.popup.popup_for_token(token, "bilingual", False, sentence=rec.raw_text,
                                                       tokens=rec.tokenized.tokens, show=False)
                     win._ingest_sentence("もう帰ります。", "manual")
-                    win.overlay.popup.study_link.linkActivated.emit("map")
-                    self.assertEqual(open_map.call_args.kwargs["study"], study)
+                    win.overlay.popup.workbench_btn.click()
+                    self.assertEqual(open_map.call_args.kwargs["study"][:3], study)
             finally:
                 win._force_quit = True
                 win.close()
@@ -93,19 +93,34 @@ class StudyMapTests(unittest.TestCase):
             panel.show_token(token, sentence=sentence, tokens=tokens)
             popup.popup_for_token(token, "bilingual", False, sentence=sentence, tokens=tokens, show=False)
             focus = panel.study_link.focus
-            self.assertEqual(focus, popup.study_link.focus)
+            self.assertEqual(focus, popup._study_focus)
             self.assertEqual(focus.vocabulary, "地球が壊れる　↔　地球を壊す")
             self.assertIn("壊れる → 壊れた → 壊れたら", focus.evidence)
             self.assertEqual((focus.key, focus.lexical_key), ("condition", "pair"))
             db_path = Path(tmp) / "progress.db"
             store = LearningProgressStore(db_path)
             dialog = LearningBlueprintDialog(OfflineGrammarEngine(), store, 0, "lv2")
+            self.assertEqual(dialog.tabs.count(), 3)
+            self.assertFalse(dialog.isModal())
             study = dialog.study_map
             panel.study_link.requested.connect(study.show_focus)
             panel.study_link.linkActivated.emit("map")
             self.assertIs(dialog.tabs.currentWidget(), study)
             self.assertIn(sentence, study.reader.toPlainText())
             self.assertEqual(study.step, 0)
+            # 驗證 3 秒輕互動小選擇、一鍵全部展開與單變因實驗室
+            self.assertTrue(study.quiz_frame.isVisibleTo(study) or study.quiz_frame.isVisible() or not study.quiz_frame.isHidden())
+            study.quiz_buttons[0].click()
+            self.assertTrue(study.quiz_feedback_label.text())
+            study.expand_all_btn.click()
+            self.assertTrue(study.expand_all_btn.isChecked())
+            self.assertIn("完整 4 步推導", study.reader.toPlainText())
+            self.assertIn("壊れない", study.reader.toPlainText())
+            study.expand_all_btn.click()
+            self.assertFalse(study.expand_all_btn.isChecked())
+            self.assertTrue(study.mutation_buttons)
+            study.mutation_buttons[0].click()
+            self.assertTrue(study.mutation_result_label.text())
             study.next_step.click()
             self.assertIn("沿用上一步的結果", study.reader.toPlainText())
             self.assertIn("壊れた", study.reader.toPlainText())

@@ -39,6 +39,14 @@ class FunctionWorker(QRunnable):
                 pass
 
 
+def _safe_emit(sig: Any, *args: Any) -> None:
+    """避免視窗已關閉或 WorkerSignals 已被 Qt 回收時跨執行緒發送訊號拋出 RuntimeError。"""
+    try:
+        sig.emit(*args)
+    except RuntimeError:
+        pass
+
+
 class DictDownloadWorker(QRunnable):
     """在背景下載並匯入開源 Yomitan 詞典，即時回報進度條。"""
 
@@ -52,11 +60,11 @@ class DictDownloadWorker(QRunnable):
         try:
             result = self.dictionary.download_and_import_free_dictionary(
                 self.catalog_id,
-                progress=lambda msg, pct: self.signals.progress.emit(msg, pct),
+                progress=lambda msg, pct: _safe_emit(self.signals.progress, msg, pct),
             )
-            self.signals.finished.emit(result)
+            _safe_emit(self.signals.finished, result)
         except Exception as exc:
-            self.signals.failed.emit(str(exc))
+            _safe_emit(self.signals.failed, str(exc))
 
 
 class DictBundleDownloadWorker(QRunnable):
@@ -70,11 +78,11 @@ class DictBundleDownloadWorker(QRunnable):
     def run(self) -> None:
         try:
             results = self.dictionary.download_recommended_bundle(
-                progress=lambda msg, pct: self.signals.progress.emit(msg, pct),
+                progress=lambda msg, pct: _safe_emit(self.signals.progress, msg, pct),
             )
-            self.signals.finished.emit(results)
+            _safe_emit(self.signals.finished, results)
         except Exception as exc:
-            self.signals.failed.emit(str(exc))
+            _safe_emit(self.signals.failed, str(exc))
 
 
 class DictImportWorker(QRunnable):
@@ -90,8 +98,8 @@ class DictImportWorker(QRunnable):
         try:
             result = self.dictionary.import_yomitan_zip(
                 self.zip_path,
-                progress=lambda msg, pct: self.signals.progress.emit(msg, pct),
+                progress=lambda msg, pct: _safe_emit(self.signals.progress, msg, pct),
             )
-            self.signals.finished.emit(result)
+            _safe_emit(self.signals.finished, result)
         except Exception as exc:
-            self.signals.failed.emit(str(exc))
+            _safe_emit(self.signals.failed, str(exc))

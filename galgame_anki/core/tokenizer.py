@@ -9,10 +9,18 @@ from __future__ import annotations
 
 import html
 import re
-from dataclasses import dataclass
+import threading
+from dataclasses import dataclass, replace
 from typing import Any
 
-from galgame_anki.core.verb_lesson import FORMS, build_lesson, spoken_surfaces, verb_group
+from galgame_anki.core.verb_lesson import (
+    FORMS,
+    build_lesson,
+    form_reasons_for_surface,
+    spoken_reasons_for_surface,
+    spoken_surfaces,
+    verb_group,
+)
 from galgame_anki.core.context_meaning import is_otherwise_clause
 from galgame_anki.core.dictionary import DictionaryEngine, LookupMatch
 from galgame_anki.core.hook_cleaner import clean_galgame_hook_text
@@ -31,10 +39,10 @@ COMMON_FUNCTION_WORDS: set[str] = {
     "せる", "及び", "これら", "とき", "では", "にて", "ほか", "ながら", "うち",
     "そして", "とともに", "ただし", "かつて", "それぞれ", "または", "お", "ほど",
     "ものの", "に対する", "ほとんど", "と共に", "といった", "です", "とも", "ところ",
-    "ここ", "ね", "よ", "わ", "ぞ", "ぜ", "さ", "かな", "っけ", "んだ", "んだから",
+    "ここ", "ね", "よ", "わ", "ぞ", "ぜ", "かな", "っけ", "んだ", "んだから",
     "のに", "けど", "けれど", "けれども", "だって", "って", "じゃ", "じゃない",
     "だろう", "でしょう", "らしい", "みたい", "かも", "だけ", "しか", "ばかり",
-    "くらい", "ぐらい", "さえ", "こそ", "でも", "ても", "でも", "ちゃ", "じゃ",
+    "くらい", "ぐらい", "さえ", "こそ", "ても", "ちゃ",
 }
 
 _PUNCT_RE = re.compile(r"^[。、！？「」『』（）\(\)\[\]【】…・―—\s,.!?:;\"'~〜]+$")
@@ -90,12 +98,35 @@ def build_ruby_word(surface: str, reading: str) -> str:
     return f"{prefix}<ruby>{kanji_part}<rt>{rt_part}</rt></ruby>{suffix}"
 
 
+def _kuru_stem_override(surface: str, lemma: str, lemma_reading: str) -> tuple[str, str, str] | None:
+    """修正カ變「来る」在各活用形下「来」的讀音切換（こ／き／く）。"""
+    if not lemma.endswith("来る") or not lemma_reading.endswith("くる"):
+        return None
+    stem_surface = lemma[:-1]
+    if not surface.startswith(stem_surface) or len(surface) <= len(stem_surface):
+        return None
+    tail = surface[len(stem_surface):]
+    prefix_rd = lemma_reading[:-2]
+    if tail.startswith(("な", "られ", "させ", "よう", "い", "ず", "ぬ")):
+        return stem_surface, prefix_rd + "こ", tail
+    if tail.startswith(("て", "た", "ま", "ち", "ちゃ", "とく", "とい")):
+        return stem_surface, prefix_rd + "き", tail
+    if tail.startswith(("る", "れ")):
+        return stem_surface, prefix_rd + "く", tail
+    return None
+
+
 def build_conjugated_ruby(surface: str, lemma: str, lemma_reading: str) -> str:
     """為活用變形後的詞（如「泳げない」<-「泳ぐ / およぐ」）精準只在漢字詞幹上標註假名！"""
     if not lemma_reading or not contains_kanji(surface) or surface == lemma_reading:
         return html.escape(surface)
     if surface == lemma or not lemma:
         return build_ruby_word(surface, lemma_reading)
+
+    kuru_ov = _kuru_stem_override(surface, lemma, lemma_reading)
+    if kuru_ov is not None:
+        stem_surface, stem_reading, surface_tail = kuru_ov
+        return build_ruby_word(stem_surface, stem_reading) + html.escape(surface_tail)
 
     # 1. 找出 surface 與 lemma 的共同開頭（包含漢字的部分，如 泳げない vs 泳ぐ -> 共同開頭「泳」）
     common_len = 0
@@ -129,6 +160,10 @@ def build_conjugated_inline_furigana(surface: str, lemma: str, lemma_reading: st
         return surface
     if surface == lemma or not lemma:
         return f"{surface}({lemma_reading})"
+    kuru_ov = _kuru_stem_override(surface, lemma, lemma_reading)
+    if kuru_ov is not None:
+        stem_surface, stem_reading, surface_tail = kuru_ov
+        return f"{stem_surface}({stem_reading}){surface_tail}"
     common_len = 0
     for a, b in zip(surface, lemma):
         if a == b:
@@ -190,6 +225,7 @@ class TokenizedSentence:
 # Janome 模組級單例快取（IPADIC 載入只需 1 次，後續分詞 <1ms）
 _SHARED_JANOME: Any = None
 _JANOME_CHECKED: bool = False
+_JANOME_LOCK = threading.Lock()
 
 # Janome IPADIC 口語組塊合併表（解決 IPADIC 把口語詞「あんた」「えいっ」「でしょっ」切碎的問題）
 _SPOKEN_PRE_MERGES: dict[tuple[str, str], tuple[str, str, str, bool]] = {
@@ -222,14 +258,18 @@ _AUX_ATTACH_SURFACES: set[str] = {
 
 def _get_shared_janome() -> Any:
     global _SHARED_JANOME, _JANOME_CHECKED
-    if not _JANOME_CHECKED:
-        _JANOME_CHECKED = True
-        try:
-            from janome.tokenizer import Tokenizer as JanomeTokenizer
+    if _JANOME_CHECKED:
+        return _SHARED_JANOME
+    with _JANOME_LOCK:
+        if not _JANOME_CHECKED:
+            try:
+                from janome.tokenizer import Tokenizer as JanomeTokenizer
 
-            _SHARED_JANOME = JanomeTokenizer()
-        except Exception:
-            _SHARED_JANOME = None
+                _SHARED_JANOME = JanomeTokenizer()
+            except Exception:
+                _SHARED_JANOME = None
+            finally:
+                _JANOME_CHECKED = True
     return _SHARED_JANOME
 
 
@@ -352,6 +392,9 @@ class JapaneseTokenizer:
                     lookup = self.dictionary.lookup_exact_or_deinflect(surface, lemma_hint=base)
                     if not lookup or lookup.lemma != base:
                         lookup = self.dictionary.lookup_exact_or_deinflect(base, lemma_hint=base)
+                    if lookup is not None:
+                        form_reasons = form_reasons_for_surface(base, group, surface)
+                        lookup = replace(lookup, surface=surface, reasons=form_reasons or lookup.reasons)
                     reading = lookup.reading if lookup else _kata_to_hira(m.reading_form())
                     tokens.append(Token(surface, base, reading, start, end, lookup=lookup,
                                         has_dict_entry=lookup is not None, verb_type=conjugation,
@@ -525,6 +568,7 @@ class JapaneseTokenizer:
                         (npos0 == "助動詞" and nsurf in _AUX_ATTACH_SURFACES)
                         or (npos0 == "動詞" and npos1 in ("非自立", "接尾") and nsurf in _AUX_ATTACH_SURFACES)
                         or (npos0 == "形容詞" and npos1 in ("非自立", "接尾") and nsurf in ("ない", "なかっ", "やすい", "にくい"))
+                        or (npos0 == "形容詞" and nsurf in ("ない", "なかっ") and node.get("te_end") == node["end"])
                     ):
                         node["surface"] += nsurf
                         node["end"] = nxt["end"]
@@ -536,8 +580,11 @@ class JapaneseTokenizer:
                         node["end"] = nxt["end"]
                         j += 1
                         break
-                    # 接續助詞與動詞共同構成て形；後續補助動詞由下一輪辨認。
-                    if npos0 == "助詞" and npos1 == "接続助詞" and nsurf in ("て", "で"):
+                    # 接續助詞（或非自立動詞誤標）與動詞共同構成て形；後續補助動詞由下一輪辨認。
+                    if (
+                        (npos0 == "助詞" and npos1 == "接続助詞" and nsurf in ("て", "で"))
+                        or (npos0 == "動詞" and npos1 == "非自立" and nsurf in ("て", "で"))
+                    ):
                         node["surface"] += nsurf
                         node["end"] = nxt["end"]
                         node["te_end"] = nxt["end"]
@@ -588,14 +635,16 @@ class JapaneseTokenizer:
             # 若原句是未活用單詞，傳入 Janome 統計讀音（如 足 -> あし, 事 -> こと, 君 -> きみ/くん）
             pos_hint = nd["pos1"] if (pos0 == "名詞" and nd["pos1"] in ("代名詞", "接尾")) else pos0
             pass_rd = rd_hint if (surface == base_hint and rd_hint and not contains_kanji(rd_hint)) else ""
-            # 若 Janome 識別「泳げない」的 stem base 是可能形一段「泳げる」，改不鎖死 lemma_hint 讓 deinflector 還原到五段「泳ぐ」
-            pass_lemma = "" if (base_hint.endswith("える") or base_hint.endswith("げる") or base_hint.endswith("ける")) and surface != base_hint else base_hint
+            # 若 Janome 將五段可能形詞幹標為一段原形（如 泳げる/話せる/待てる/読める），不鎖死 lemma_hint 讓 deinflector 還原五段原形
+            _e_row_pot = ("える", "ける", "げる", "せる", "てる", "ねる", "べる", "める", "れる")
+            pass_lemma = "" if (base_hint.endswith(_e_row_pot) and surface != base_hint) else base_hint
 
+            is_spoken = bool(nd.get("spoken"))
             lookup = self.dictionary.lookup_exact_or_deinflect(
-                base_hint if nd.get("spoken") else surface,
+                base_hint if is_spoken else surface,
                 pos_hint=pos_hint,
                 reading_hint=pass_rd,
-                lemma_hint=base_hint if nd.get("spoken") else pass_lemma,
+                lemma_hint=base_hint if is_spoken else pass_lemma,
             )
             if lookup is None and base_hint and base_hint != surface:
                 lookup = self.dictionary.lookup_exact_or_deinflect(
@@ -604,8 +653,22 @@ class JapaneseTokenizer:
                     reading_hint=pass_rd,
                 )
 
+            if lookup is not None and surface != lookup.lemma:
+                grp = verb_group(lookup.lemma, nd.get("verb_type", ""))
+                if is_spoken:
+                    s_reasons = spoken_reasons_for_surface(lookup.lemma, grp, surface)
+                    lookup = replace(lookup, surface=surface, reasons=s_reasons or lookup.reasons)
+                elif not lookup.reasons or lookup.surface != surface:
+                    f_reasons = form_reasons_for_surface(lookup.lemma, grp, surface)
+                    lookup = replace(lookup, surface=surface, reasons=f_reasons or lookup.reasons)
+
             lemma = lookup.lemma if lookup else base_hint
-            reading = lookup.reading if (lookup and lookup.reading and not contains_kanji(lookup.reading)) else rd_hint
+            if lookup and lookup.reading and not contains_kanji(lookup.reading):
+                reading = lookup.reading
+            elif surface == base_hint:
+                reading = rd_hint
+            else:
+                reading = ""
             # 若表層本身未活用且 Janome 給了精準讀音（如 足 -> あし），確保不落回漢字
             if surface == lemma and pass_rd and (not reading or contains_kanji(reading)):
                 reading = pass_rd

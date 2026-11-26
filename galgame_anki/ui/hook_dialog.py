@@ -27,6 +27,7 @@ from galgame_anki.adapters.hook_engine import (
     is_textractor_installed,
 )
 from galgame_anki.config import AppConfig
+from galgame_anki.ui.theme import get_palette
 from galgame_anki.ui.workers import FunctionWorker
 
 
@@ -64,16 +65,17 @@ class HookManagerDialog(QDialog):
         layout.setContentsMargins(16, 14, 16, 14)
         layout.setSpacing(10)
 
+        p = get_palette(self.config.ui_theme)
         # 1. Hook 引擎安裝狀態
         eng_box = QFrame()
         eng_box.setObjectName("CardPanel")
         eb = QVBoxLayout(eng_box)
         row1 = QHBoxLayout()
         self.engine_status = QLabel("")
-        self.engine_status.setStyleSheet("font-weight: 700; color: #93c5fd;")
+        self.engine_status.setStyleSheet(f"font-weight: 500; color: {p.pill_info_fg}; background: transparent;")
         row1.addWidget(self.engine_status, 1)
 
-        self.install_btn = QPushButton("⬇ 一鍵下載 Textractor Hook 引擎")
+        self.install_btn = QPushButton("下載 Textractor Hook 引擎")
         self.install_btn.setObjectName("PrimaryBtn")
         self.install_btn.clicked.connect(self._install_textractor)
         row1.addWidget(self.install_btn)
@@ -93,7 +95,7 @@ class HookManagerDialog(QDialog):
 
         phead = QHBoxLayout()
         ptitle = QLabel("執行中的 Wine / Windows 遊戲進程（自動對齊 WINEPREFIX 與 32/64 位元）")
-        ptitle.setStyleSheet("font-weight: 700; color: #6ee7b7;")
+        ptitle.setStyleSheet(f"font-weight: 500; color: {p.pill_ok_fg}; background: transparent;")
         phead.addWidget(ptitle, 1)
 
         scan_btn = QPushButton("🔄 重新掃描")
@@ -217,10 +219,28 @@ class HookManagerDialog(QDialog):
         tgt = item.data(Qt.ItemDataRole.UserRole)
         if not isinstance(tgt, HookTargetProcess):
             return
+        if not is_textractor_installed():
+            self.attach_btn.setEnabled(False)
+            self._append_log("[GalAnki] 正在背景下載 Textractor Hook 引擎，完成後自動掛載…")
+            worker = FunctionWorker(ensure_textractor_installed)
+            worker.signals.finished.connect(lambda _r, t=tgt: self._finish_attach_after_install(t))
+            worker.signals.failed.connect(self._on_attach_install_fail)
+            self._workers.append(worker)
+            self.thread_pool.start(worker)
+            return
+        self._do_attach(tgt)
+
+    def _finish_attach_after_install(self, tgt: HookTargetProcess) -> None:
+        self.attach_btn.setEnabled(True)
+        self._refresh_engine_status()
+        self._do_attach(tgt)
+
+    def _on_attach_install_fail(self, err: str) -> None:
+        self.attach_btn.setEnabled(True)
+        QMessageBox.warning(self, "下載失敗", err)
+
+    def _do_attach(self, tgt: HookTargetProcess) -> None:
         try:
-            if not is_textractor_installed():
-                ensure_textractor_installed()
-                self._refresh_engine_status()
             self.hook_manager.attach_target(tgt)
             self.target_attached.emit(tgt)
         except Exception as exc:
@@ -231,13 +251,23 @@ class HookManagerDialog(QDialog):
         self._append_log("[GalAnki] 已中斷 Hook 掛載。")
 
     def _open_textractor_gui(self) -> None:
+        item = self.proc_list.currentItem()
+        tgt = item.data(Qt.ItemDataRole.UserRole) if item else None
+        target_arg = tgt if isinstance(tgt, HookTargetProcess) else None
+        if not is_textractor_installed():
+            self._append_log("[GalAnki] 正在背景下載 Textractor，完成後自動開啟 GUI…")
+            worker = FunctionWorker(ensure_textractor_installed)
+            worker.signals.finished.connect(lambda _r, t=target_arg: self._launch_gui_now(t))
+            worker.signals.failed.connect(lambda err: QMessageBox.warning(self, "下載失敗", err))
+            self._workers.append(worker)
+            self.thread_pool.start(worker)
+            return
+        self._launch_gui_now(target_arg)
+
+    def _launch_gui_now(self, tgt: HookTargetProcess | None) -> None:
         try:
-            if not is_textractor_installed():
-                ensure_textractor_installed()
-                self._refresh_engine_status()
-            item = self.proc_list.currentItem()
-            tgt = item.data(Qt.ItemDataRole.UserRole) if item else None
-            self.hook_manager.launch_textractor_gui(tgt if isinstance(tgt, HookTargetProcess) else None)
+            self._refresh_engine_status()
+            self.hook_manager.launch_textractor_gui(tgt)
             self._append_log("[GalAnki] 已開啟 Textractor GUI（請確認已啟用 Copy to Clipboard，複製的文本會自動同步進 GalAnki）。")
         except Exception as exc:
             QMessageBox.warning(self, "開啟失敗", str(exc))
@@ -253,3 +283,17 @@ class HookManagerDialog(QDialog):
 
     def _append_log(self, msg: str) -> None:
         self.log_view.append(msg)
+
+    def _disconnect_hook_signals(self) -> None:
+        try:
+            self.hook_manager.console_logged.disconnect(self._append_log)
+        except (RuntimeError, TypeError):
+            pass
+
+    def done(self, result: int) -> None:  # noqa: N802
+        self._disconnect_hook_signals()
+        super().done(result)
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        self._disconnect_hook_signals()
+        super().closeEvent(event)

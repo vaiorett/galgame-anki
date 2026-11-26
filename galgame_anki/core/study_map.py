@@ -3,8 +3,8 @@ from dataclasses import dataclass
 import re
 
 from galgame_anki.core.study_steps import Walk, conjugation_walk
-
 from galgame_anki.core.verb_lesson import FORMS, build_lesson, lesson_for_token, verb_group
+from galgame_anki.core.word_associations import TRANSITIVITY_PAIRS
 from galgame_anki.core.tokenizer import Token
 from galgame_anki.core.context_meaning import explain_lookup_in_sentence
 
@@ -77,18 +77,33 @@ CONCEPTS = {
         "「息を殺して待つ」裡，等待時做了什麼？", "屏住呼吸。這裡的殺す和息を一起構成慣用說法。", "vmod/"),
 }
 
-VERB_PAIRS = (("開く", "開ける"), ("閉まる", "閉める"), ("壊れる", "壊す"), ("落ちる", "落とす"))
-PAIRS = {word: (counterpart, particle) for vi, vt in VERB_PAIRS
-         for word, counterpart, particle in ((vi, vt, "が"), (vt, vi, "を"))}
+VERB_PAIRS = tuple(dict.fromkeys((
+    ("開く", "開ける"), ("閉まる", "閉める"), ("壊れる", "壊す"), ("落ちる", "落とす"),
+    *TRANSITIVITY_PAIRS,
+)))
+PAIRS = {}
+for _vi, _vt in VERB_PAIRS:
+    PAIRS.setdefault(_vi, (_vt, "が"))
+    PAIRS.setdefault(_vt, (_vi, "を"))
 COMPOUNDS = {"入学式": "入学（入學）＋式（典禮）", "卒業式": "卒業（畢業）＋式（典禮）",
              "図書館": "図書（圖書）＋館（場所）", "映画館": "映画（電影）＋館（場所）"}
+_COMPOUND_SUFFIX_GLOSS = {
+    "式": "典禮／方式", "館": "場館／建築", "場": "場所", "室": "房間／室",
+    "屋": "店鋪／人物", "店": "商店", "駅": "車站", "校": "學校",
+    "力": "能力／力量", "感": "感覺／感受", "性": "性質",
+}
 POTENTIAL_STEMS = dict(zip("うつるむぶぬくぐす", "えてれめべねけげせ"))
 
 FORM_TOPICS = {
-    "te": "connect", "teiru": "state", "teru": "state", "teta": "state", "tenai": "state",
-    "tenda": "stance", "tetanda": "stance", "tero": "stance", "chau": "completion",
-    "chatta": "completion", "toku": "prepare", "toite": "prepare", "tara": "condition",
-    "nakya": "condition", "nai": "negative", "chadame": "stance",
+    "te": "connect", "teiru": "state", "teita": "state", "teru": "state", "teta": "state",
+    "tenai": "state", "tenakatta": "state",
+    "tenda": "stance", "terunda": "stance", "tetanda": "stance", "tero": "stance", "imperative": "stance",
+    "chau": "completion", "chatta": "completion",
+    "toku": "prepare", "toite": "prepare", "toita": "prepare",
+    "tara": "condition", "ba": "condition", "nakya": "condition", "nakucha": "condition",
+    "nai": "negative", "nakatta": "negative", "masu_neg": "negative",
+    "potential": "ability", "passive": "roles", "causative": "roles",
+    "chadame": "stance", "volitional": "stance",
 }
 
 
@@ -109,10 +124,38 @@ def token_group(token):
     return next((g for e in token.lookup.all_entries if (g := verb_group(token.lemma, e.pos))), "")
 
 
+def _detect_compound(token: Token, tokens: tuple[Token, ...] | list[Token]) -> tuple[str, str] | None:
+    """辨認完整複合詞或被 Janome 拆開的相鄰複合名詞（如 入学＋式 → 入学式）。"""
+    if token.lemma in COMPOUNDS:
+        return token.lemma, COMPOUNDS[token.lemma]
+    if tokens:
+        idx = next((i for i, t in enumerate(tokens) if t.start == token.start and t.end == token.end), -1)
+        if idx >= 0:
+            if idx + 1 < len(tokens) and tokens[idx].end == tokens[idx + 1].start:
+                merged = tokens[idx].surface + tokens[idx + 1].surface
+                if merged in COMPOUNDS:
+                    return merged, COMPOUNDS[merged]
+                suf = tokens[idx + 1].surface
+                if suf in _COMPOUND_SUFFIX_GLOSS and len(tokens[idx].surface) >= 2 and re.fullmatch(r"[一-龯]+", tokens[idx].surface):
+                    return merged, f"{tokens[idx].surface}（限定）＋{suf}（{_COMPOUND_SUFFIX_GLOSS[suf]}）"
+            if idx > 0 and tokens[idx - 1].end == tokens[idx].start:
+                merged = tokens[idx - 1].surface + tokens[idx].surface
+                if merged in COMPOUNDS:
+                    return merged, COMPOUNDS[merged]
+                suf = tokens[idx].surface
+                if suf in _COMPOUND_SUFFIX_GLOSS and len(tokens[idx - 1].surface) >= 2 and re.fullmatch(r"[一-龯]+", tokens[idx - 1].surface):
+                    return merged, f"{tokens[idx - 1].surface}（限定）＋{suf}（{_COMPOUND_SUFFIX_GLOSS[suf]}）"
+    if len(token.lemma) >= 3 and token.lemma[-1] in _COMPOUND_SUFFIX_GLOSS and re.fullmatch(r"[一-龯]+", token.lemma):
+        head, suf = token.lemma[:-1], token.lemma[-1]
+        return token.lemma, f"{head}（限定）＋{suf}（{_COMPOUND_SUFFIX_GLOSS[suf]}）"
+    return None
+
+
 def focus_for(token: Token, *, phrase=False, particle=None, tokens=(), sentence="", translation="") -> Focus:
     lemma, surface = token.lemma, token.surface
     lexical = "word"
-    if lemma in COMPOUNDS:
+    compound_hit = None if phrase else _detect_compound(token, tokens)
+    if compound_hit is not None:
         lexical = "compound"
     elif surface in ("ごめん", "ごめんなさい", "すみません", "すまない"):
         lexical = "register"
@@ -122,7 +165,7 @@ def focus_for(token: Token, *, phrase=False, particle=None, tokens=(), sentence=
         lexical = "pair"
     elif lemma in ("気持ち", "気分", "本音"):
         lexical = "feelings"
-    vocab = surface if phrase else lemma
+    vocab = surface if phrase else (compound_hit[0] if compound_hit else lemma)
     if not phrase:
         for i, t in enumerate(tokens[:-2]):
             marker, verb = tokens[i+1:i+3]
@@ -137,8 +180,8 @@ def focus_for(token: Token, *, phrase=False, particle=None, tokens=(), sentence=
                         counterpart = "を" if expected == "が" else "が"
                         vocab = f"{t.surface}{expected}{lemma}　↔　{t.surface}{counterpart}{other}"
                 break
-    if lexical == "compound":
-        vocab += "　＝　" + COMPOUNDS[lemma]
+    if lexical == "compound" and compound_hit is not None:
+        vocab = f"{compound_hit[0]}　＝　{compound_hit[1]}"
     if lexical == "pair" and "↔" not in vocab:
         vocab += f"　↔　{PAIRS[lemma][0]}（自他對照）"
     lexical_walk = None
@@ -151,9 +194,9 @@ def focus_for(token: Token, *, phrase=False, particle=None, tokens=(), sentence=
             ("找出原形與搭配", f"這個用法的原形是「{lemma}」，常用「{case_marker}」標出發生變化的事物。", left),
             ("改變描述視角", perspective + f"換用另一個動詞「{other}」。", right or other),
         ))
-    elif lexical == "compound":
-        lexical_walk = Walk(lemma, (("找出兩個成分", "先看右側核心，再看左側限定它的種類。", COMPOUNDS[lemma]),
-                                   ("合回一個詞", "用右側的類別理解整個詞。", lemma)))
+    elif lexical == "compound" and compound_hit is not None:
+        lexical_walk = Walk(compound_hit[0], (("找出兩個成分", "先看右側核心，再看左側限定它的種類。", compound_hit[1]),
+                                              ("合回一個詞", "用右側的類別理解整個詞。", compound_hit[0])))
     elif vocab != lemma and not phrase:
         lexical_walk = Walk(lemma, (("找回台詞裡的形式", "把詞典裡的詞放回它真正出現的位置。", surface),
                                    ("連同相鄰詞一起讀", "助詞把前面的詞接到後面的動作。", vocab)))
@@ -173,9 +216,9 @@ def focus_for(token: Token, *, phrase=False, particle=None, tokens=(), sentence=
                 ))
     if phrase:
         return Focus(lexical, word_evidence, vocab, lexical, lexical_walk, lexical_walk)
-    # 五段可能形（如 言える）另接否定過去。須吻合完整詞形，以免誤判普通一段動詞。
+    # 五段／一段可能形另接否定或過去（如 言えなかった、泳げない、食べられなかった）。須吻合完整詞形以免誤判。
     group = token_group(token)
-    if lemma == "言える" and surface == "言えなかった":
+    if lemma == "言える" and surface in ("言えなかった", "言えない", "言えた"):
         lemma, group = "言う", "v5"
     if group == "v5" and lemma[-1:] in POTENTIAL_STEMS:
         suffix = POTENTIAL_STEMS[lemma[-1]]
@@ -185,6 +228,22 @@ def focus_for(token: Token, *, phrase=False, particle=None, tokens=(), sentence=
                                 ("否定能做這件事", "將る換成ない，表示不能做到。", possible + "ない"),
                                 ("回顧當時的情況", "ない換成なかった。現在才同時具備『沒能』和『當時』兩層意思。", surface)))
             return Focus("ability", f"{lemma} → {possible}る（能）→ {possible}ない（不能）→ {surface}（當時沒能）", vocab, lexical, walk, lexical_walk)
+        if surface == possible + "ない":
+            walk = Walk(lemma, (("先得到能做的形式", f"五段詞尾「{lemma[-1]}」換成「{suffix}る」。", possible + "る"),
+                                ("否定能做這件事", "將る換成ない，表示現在無法做到。", surface)))
+            return Focus("ability", f"{lemma} → {possible}る（能）→ {surface}（無法）", vocab, lexical, walk, lexical_walk)
+    elif group == "v1" and lemma.endswith("る"):
+        stem = lemma[:-1]
+        for pot_suf in ("られ", "れ"):
+            if surface == stem + pot_suf + "なかった":
+                walk = Walk(lemma, (("先造出可能形", f"一段動詞去「る」接「{pot_suf}る」。", stem + pot_suf + "る"),
+                                    ("否定這份能力", "去「る」接「ない」，表示做不到。", stem + pot_suf + "ない"),
+                                    ("回顧當時情況", "「ない」換成「なかった」，表示當時沒能做到。", surface)))
+                return Focus("ability", f"{lemma} → {stem}{pot_suf}る（能）→ {stem}{pot_suf}ない（不能）→ {surface}（當時沒能）", vocab, lexical, walk, lexical_walk)
+            if surface == stem + pot_suf + "ない":
+                walk = Walk(lemma, (("先造出可能形", f"一段動詞去「る」接「{pot_suf}る」。", stem + pot_suf + "る"),
+                                    ("否定這份能力", "去「る」接「ない」，表示做不到。", surface)))
+                return Focus("ability", f"{lemma} → {stem}{pot_suf}る（能）→ {surface}（無法）", vocab, lexical, walk, lexical_walk)
     if group:
         negative = build_lesson(lemma, group, "nai")
         if negative and surface == negative.surface[:-1] + "かった":

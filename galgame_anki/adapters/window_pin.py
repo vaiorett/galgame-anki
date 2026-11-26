@@ -13,19 +13,33 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
 import threading
+import uuid
 from pathlib import Path
 
 OVERLAY_WINDOW_TITLE = "GalAnki 覆蓋層"
 POPUP_WINDOW_TITLE = "GalAnki 查詞浮窗"
 TOAST_WINDOW_TITLE = "GalAnki 收錄通知"
 KWIN_PLUGIN_NAME = "galanki_overlay_pin"
-KWIN_UNPIN_PLUGIN_NAME = "galanki_overlay_unpin"
 KWIN_MINIMIZE_ANKI_PLUGIN = "galanki_minimize_anki_once"
 KWIN_RULE_SECTION = "galanki-overlay-layer"
+
+
+def _kwin_runtime_dir() -> Path:
+    """回傳目前使用者專屬（0700）的 KWin 暫存腳本目錄，避免多使用者 `/tmp` 競態與權限外洩。"""
+    base = Path(os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir())
+    uid = os.getuid() if hasattr(os, "getuid") else os.getpid()
+    runtime = base / f"galanki-{uid}"
+    runtime.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(runtime, 0o700)
+    except OSError:
+        pass
+    return runtime
 
 
 def ensure_kwin_overlay_layer_rule(
@@ -39,7 +53,10 @@ def ensure_kwin_overlay_layer_rule(
             return False
         kwinrules_path = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "kwinrulesrc"
 
-    existing_text = kwinrules_path.read_text(encoding="utf-8") if kwinrules_path.exists() else ""
+    try:
+        existing_text = kwinrules_path.read_text(encoding="utf-8", errors="replace") if kwinrules_path.exists() else ""
+    except OSError:
+        return False
 
     # 逐段保留原始文字，絕不改動使用者既有的 mpv / obsidian 等其他視窗規則（含 \s 等跳脫）
     sections: list[tuple[str, list[str]]] = []
@@ -86,6 +103,9 @@ def ensure_kwin_overlay_layer_rule(
         sections.append(("General", [f"Order={KWIN_RULE_SECTION}"]))
 
     if enabled:
+        escaped_titles = "|".join(
+            re.escape(t) for t in (OVERLAY_WINDOW_TITLE, POPUP_WINDOW_TITLE, TOAST_WINDOW_TITLE)
+        )
         rule_lines = [
             "Description=GalAnki 字幕覆蓋層與查詞浮窗置頂於全螢幕之上",
             "acceptfocus=false",
@@ -98,7 +118,7 @@ def ensure_kwin_overlay_layer_rule(
             "skippagerrule=2",
             "skiptaskbar=true",
             "skiptaskbarrule=2",
-            f"title=^(?:{OVERLAY_WINDOW_TITLE}|{POPUP_WINDOW_TITLE}|{TOAST_WINDOW_TITLE})$",
+            f"title=^(?:{escaped_titles})$",
             "titlematch=3",
         ]
         sections.append((KWIN_RULE_SECTION, rule_lines))
@@ -113,8 +133,13 @@ def ensure_kwin_overlay_layer_rule(
     new_text = "\n\n".join(out_chunks) + "\n"
     changed = new_text != existing_text
     if changed:
-        kwinrules_path.parent.mkdir(parents=True, exist_ok=True)
-        kwinrules_path.write_text(new_text, encoding="utf-8")
+        try:
+            kwinrules_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_rules = kwinrules_path.with_name(f".{kwinrules_path.name}.{os.getpid()}.tmp")
+            tmp_rules.write_text(new_text, encoding="utf-8")
+            os.replace(tmp_rules, kwinrules_path)
+        except OSError:
+            return False
 
     if reconfigure and changed:
         qdbus = _find_qdbus()
@@ -133,7 +158,7 @@ def ensure_kwin_overlay_layer_rule(
 
 
 def _find_qdbus() -> str | None:
-    return shutil.which("qdbus6") or shutil.which("qdbus")
+    return shutil.which("qdbus6") or shutil.which("qdbus-qt6") or shutil.which("qdbus")
 
 
 def is_kde_wayland_kwin_available() -> bool:
@@ -143,6 +168,9 @@ def is_kde_wayland_kwin_available() -> bool:
     if os.environ.get("QT_QPA_PLATFORM", "").lower() in ("offscreen", "minimal"):
         return False
     if os.environ.get("XDG_SESSION_TYPE", "").lower() != "wayland":
+        return False
+    desktop = (os.environ.get("XDG_CURRENT_DESKTOP") or os.environ.get("DESKTOP_SESSION") or "").lower()
+    if desktop and not ("kde" in desktop or "plasma" in desktop):
         return False
     return _find_qdbus() is not None
 
@@ -255,7 +283,12 @@ function applyToWindow(w) {{
             const g = w.frameGeometry;
             const rect = clampRect(w, savedOverlayGeom.x, savedOverlayGeom.y, g.width, g.height);
             if (Math.abs(g.x - rect.x) > 4 || Math.abs(g.y - rect.y) > 4) {{
-                w.frameGeometry = rect;
+                placingOverlay = true;
+                try {{
+                    w.frameGeometry = rect;
+                }} finally {{
+                    placingOverlay = false;
+                }}
             }}
         }}
         if (w.frameGeometry) {{
@@ -317,6 +350,7 @@ class KWinOverlayPinner:
         self._script_path: Path | None = None
         self._pinned: bool = True
         self._active: bool = False
+        self._closed: bool = False
 
     @property
     def is_supported(self) -> bool:
@@ -330,11 +364,11 @@ class KWinOverlayPinner:
     ) -> None:
         """非同步將 KWin 置頂狀態套用至覆蓋層與查詞浮窗（永不阻塞 UI 執行緒）。"""
         self._pinned = bool(pinned)
-        if not self.is_supported:
+        if not self.is_supported or self._closed:
             return
         threading.Thread(
             target=self._apply_sync,
-            args=(bool(pinned), initial_geometry, force_reload),
+            args=(initial_geometry, force_reload),
             daemon=True,
         ).start()
 
@@ -344,7 +378,6 @@ class KWinOverlayPinner:
 
     def _apply_sync(
         self,
-        pinned: bool,
         initial_geometry: tuple[int, int, int, int] | None,
         force_reload: bool,
     ) -> None:
@@ -352,11 +385,13 @@ class KWinOverlayPinner:
         if not qdbus:
             return
         with self._lock:
+            if self._closed:
+                return
             if self._active and not force_reload:
                 return
+            pinned = self._pinned
             ensure_kwin_overlay_layer_rule(enabled=pinned, reconfigure=True)
             self._unload_locked(qdbus, KWIN_PLUGIN_NAME)
-            self._unload_locked(qdbus, KWIN_UNPIN_PLUGIN_NAME)
 
             js = build_kwin_pin_script(
                 overlay_title=self.overlay_title,
@@ -364,11 +399,16 @@ class KWinOverlayPinner:
                 pinned=pinned,
                 initial_geometry=initial_geometry,
             )
-            tmp_dir = Path(tempfile.gettempdir())
-            script_file = tmp_dir / f"galanki_kwin_pin_{os.getpid()}.js"
+            old_path = self._script_path
+            script_file = _kwin_runtime_dir() / f"kwin_pin_{os.getpid()}_{uuid.uuid4().hex[:8]}.js"
             try:
                 script_file.write_text(js, encoding="utf-8")
                 self._script_path = script_file
+                if old_path is not None and old_path != script_file:
+                    try:
+                        old_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
                 res = subprocess.run(
                     [qdbus, "org.kde.KWin", "/Scripting", "loadScript", str(script_file), KWIN_PLUGIN_NAME],
                     capture_output=True,
@@ -405,9 +445,9 @@ class KWinOverlayPinner:
         """退出應用程式時卸載 KWin 腳本並清理暫存檔。"""
         qdbus = _find_qdbus()
         with self._lock:
+            self._closed = True
             if qdbus and self._active:
                 self._unload_locked(qdbus, KWIN_PLUGIN_NAME)
-                self._unload_locked(qdbus, KWIN_UNPIN_PLUGIN_NAME)
                 self._unload_locked(qdbus, KWIN_MINIMIZE_ANKI_PLUGIN)
                 self._active = False
             if self._script_path is not None:
@@ -419,7 +459,7 @@ class KWinOverlayPinner:
 
 
 def build_kwin_minimize_anki_script(window_ms: int = 18000) -> str:
-    """產生一次性 KWin 6 JS 腳本：自動將剛在背景啟動的 Anki 主視窗最小化一次，絕不干擾之後手動點開 Anki。"""
+    """產生一次性 KWin 6 JS 腳本：自動將剛在背景啟動的 Anki 主視窗最小化一次，絕不干擾 GalAnki 自身或之後手動點開 Anki。"""
     deadline_ms = max(3000, int(window_ms))
     return f"""
 const DEADLINE = Date.now() + {deadline_ms};
@@ -430,8 +470,11 @@ function isAnkiWindow(w) {{
     const rc = String(w.resourceClass || "").toLowerCase();
     const rn = String(w.resourceName || "").toLowerCase();
     const cap = String(w.caption || "");
+    if (rc.includes("galanki") || rn.includes("galanki") || rc.includes("galgame-anki") || rn.includes("galgame-anki") || cap.includes("GalAnki")) {{
+        return false;
+    }}
     if (rc.includes("anki") || rn.includes("anki")) {{
-        if (!cap.includes("GalAnki")) return true;
+        return true;
     }}
     return false;
 }}
@@ -463,7 +506,7 @@ def minimize_anki_once_kwin(window_ms: int = 18000) -> None:
         return
 
     def _run() -> None:
-        script_file = Path(tempfile.gettempdir()) / f"galanki_min_anki_{os.getpid()}.js"
+        script_file = _kwin_runtime_dir() / f"min_anki_{os.getpid()}_{uuid.uuid4().hex[:8]}.js"
         try:
             subprocess.run(
                 [qdbus, "org.kde.KWin", "/Scripting", "unloadScript", KWIN_MINIMIZE_ANKI_PLUGIN],

@@ -69,8 +69,8 @@ class SentenceBankDialog(QDialog):
         root.setSpacing(10)
 
         intro = QLabel(
-            "<b>AJATT / Refold 低垂果實挖礦：</b> 自動扣除您 Anki 裡的已知詞，從遊戲劇本庫篩出"
-            "「<b>正好只差 1 個高頻生詞、且附帶 0% BGM 聲優純人聲</b>」的黃金句（支援按章節與喜歡的角色篩選，絕不劇透）！"
+            "<span style='font-weight:500;'>AJATT / Refold 低垂果實挖礦：</span> 自動扣除您 Anki 裡的已知詞，從遊戲劇本庫篩出"
+            "「<span style='font-weight:500;'>正好只差 1 個高頻生詞、且附帶 0% BGM 聲優純人聲</span>」的黃金句（支援按章節與喜歡的角色篩選，絕不劇透）！"
         )
         intro.setWordWrap(True)
         root.addWidget(intro)
@@ -150,7 +150,7 @@ class SentenceBankDialog(QDialog):
 
         hdr = QHBoxLayout()
         self.word_lbl = QLabel("點選上方任一句 1T 黃金句預覽詳情")
-        self.word_lbl.setStyleSheet("font-size: 18px; font-weight: 700; background: transparent;")
+        self.word_lbl.setStyleSheet("font-size: 18px; font-weight: 500; background: transparent;")
         hdr.addWidget(self.word_lbl)
 
         self.reading_lbl = QLabel("")

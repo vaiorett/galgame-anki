@@ -95,9 +95,12 @@ def calendar_topics():
     yield Topic("weekdays", group, "星期與週末", "取星期名稱的第一個漢字，加曜日。日曆上的（月）是星期一。",
                 tuple((k+"曜日", r+"ようび", "星期"+c) for k,r,c in zip("月火水木金土日", "げつ か すい もく きん ど にち".split(), "一二三四五六日")) +
                 (("何曜日", "なんようび", "星期幾"), ("平日／週末", "へいじつ／しゅうまつ", "平日／週末")), tags="禮拜 星期天 星期日 週一 曜日")
-    yield Topic("hours", group, "時刻：幾點與半點", "在鐘面上定位，用數字加時。四時、七時、九時分別讀よじ、しちじ、くじ。",
+    yield Topic("hours", group, "時刻：幾點與半點", "在鐘面上定位，用數字加時。四時、七時、九時分別讀よじ、しちじ、くじ；24 小時制直接唸十三時至二十四時。",
                 numbered_rows("時", [("よ" if i == 4 else r)+"じ" for i,r in enumerate(months,1)], "{n}點") +
-                (("零時", "れいじ", "0點／午夜"), ("午前／午後", "ごぜん／ごご", "上午／下午"), ("七時半", "しちじはん", "7點半"), ("何時", "なんじ", "幾點")), "numbers", "小時 時鐘 點鐘")
+                tuple((numeral(h) + "時",
+                       {14: "じゅうよじ", 17: "じゅうしちじ", 19: "じゅうくじ", 24: "にじゅうよじ"}.get(h, number_reading(h) + "じ"),
+                       f"{h}點") for h in range(13, 25)) +
+                (("零時", "れいじ", "0點／午夜"), ("午前／午後", "ごぜん／ごご", "上午／下午"), ("七時半", "しちじはん", "7點半"), ("何時", "なんじ", "幾點")), "numbers", "小時 時鐘 點鐘 24小時制")
     minute = "いっぷん にふん さんぷん よんぷん ごふん ろっぷん ななふん はっぷん きゅうふん じゅっぷん".split()
     def read_minute(n):
         tens, unit = divmod(n,10)
@@ -121,11 +124,6 @@ def reference_topics(grammar):
     data = Path(__file__).resolve().parents[1] / "data" / "reference_topics.json"
     for item in json.loads(data.read_text(encoding="utf-8")):
         topics.append(Topic(**{**item, "rows": tuple(map(tuple, item["rows"]))}))
-    for filename, title in (("starter_dict.json", "基礎詞彙"), ("core_spoken_dict.json", "高頻口語")):
-        entries = json.loads((data.parent / filename).read_text(encoding="utf-8"))
-        rows = tuple((e["term"], e["reading"], e["zh"]) for e in entries)
-        topics.append(Topic(filename.split(".")[0], "內建詞表", title,
-                            "可用詞形、假名或中文義反查。多義詞要回到台詞核對用法。", rows))
     for key, concept in CONCEPTS.items():
         topics.append(Topic("study-" + key, "逐步拆解", concept.title, concept.rule, (
             (concept.first, "", concept.contrast), (concept.second, "", ""),
@@ -136,7 +134,8 @@ def reference_topics(grammar):
             lesson = build_lesson(verb, kind, key)
             if lesson:
                 rows.append((lesson.surface, verb, lesson.rule))
-        topics.append(Topic("verb-" + key, "動詞活用", form + " · " + title, meaning, tuple(rows), "study-form"))
+        if rows:
+            topics.append(Topic("verb-" + key, "動詞活用", form + " · " + title, meaning, tuple(rows), "study-form"))
     for p in grammar.particles.values():
         topics.append(Topic("particle-" + p.surface, "助詞", p.surface + " · " + p.role, p.meaning,
                             ((p.surface, p.formula, p.role),), "study-roles", p.level))
@@ -146,8 +145,12 @@ def reference_topics(grammar):
     return topics
 
 
-# 同一條目可從中文數字、阿拉伯數字、片假名及常見輸入形式查到。
+# 同一條目可從中文數字、阿拉伯數字、簡繁中文、片假名、羅馬音及常見輸入形式查到。
 _DIGITS = "〇一二三四五六七八九"
+_EXTRA_S2T = str.maketrans("两兩个岁号数读词间时张几点礼拜週动被语假汉", "二二個歲號數讀詞間時張幾點禮拜周動被語假漢")
+_FIELD_TOKEN_SPLIT_RE = re.compile(r"[\s/／()（）·・、，,；;。]+")
+
+
 def _decimal(match):
     value = match.group().replace("零", "〇")
     if "十" in value:
@@ -161,20 +164,47 @@ def _decimal(match):
 
 
 def normalized(value):
-    value = unicodedata.normalize("NFKC", value).casefold()
-    value = value.translate(str.maketrans("两兩个岁号数读词间时张几点礼拜週", "二二個歲號數讀詞間時張幾點禮拜周"))
-    value = value.replace("ヶ月", "か月").replace("箇月", "か月")
+    from galgame_anki.core.dictionary import normalize_zh_tw
+
+    value = unicodedata.normalize("NFKC", value or "")
+    value = normalize_zh_tw(value)
+    value = value.casefold()
+    value = re.sub(r"(?<=\d),(?=\d)", "", value)
+    value = value.translate(_EXTRA_S2T)
+    for variant in ("ヶ月", "箇月", "カ月", "ヵ月"):
+        value = value.replace(variant, "か月")
     value = "".join(chr(ord(c)-96) if "ァ" <= c <= "ヶ" else c for c in value)
-    return re.sub(r"[〇零一二三四五六七八九十]+", _decimal, value)
+    # 保護「五十音」不被轉為「50音」
+    return re.sub(r"[〇零一二三四五六七八九十]+(?!音)", _decimal, value)
 
 
 class ReferenceIndex:
     def __init__(self, grammar):
-        self.topics = {t.key:t for t in reference_topics(grammar)}
+        self.topics = {t.key: t for t in reference_topics(grammar)}
         self.terms = {}
         for t in self.topics.values():
-            self.terms[t.key] = (normalized(t.title), normalized(t.tags + " " + t.group),
-                                 [tuple(map(normalized, r)) for r in t.rows], normalized(t.rule))
+            norm_rows = []
+            row_atoms = []
+            for r in t.rows:
+                nr = tuple(normalized(c) for c in r)
+                norm_rows.append(nr)
+                atoms: set[str] = set()
+                for f in nr:
+                    atoms.add(f)
+                    for part in _FIELD_TOKEN_SPLIT_RE.split(f):
+                        if part:
+                            atoms.add(part)
+                row_atoms.append(atoms)
+            title_norm = normalized(t.title)
+            title_atoms = {p for p in _FIELD_TOKEN_SPLIT_RE.split(title_norm) if p}
+            self.terms[t.key] = (
+                title_norm,
+                title_atoms,
+                normalized(t.tags + " " + t.group),
+                norm_rows,
+                row_atoms,
+                normalized(t.rule),
+            )
 
     def date_parts(self, query):
         """未指定年份的月日允許閏日，不將月份或日期錯當期間。"""
@@ -188,29 +218,42 @@ class ReferenceIndex:
         return None
 
     def find(self, query):
-        """傳回條目與該頁最相關的列；精確命中的詞形或讀音優先。"""
+        """傳回條目與該頁最相關的列；精確命中的助詞、詞頭、數字或讀音優先於子字串命中。"""
         date = self.date_parts(query)
         if date:
             month, day = date
             return [("dates", day - 1), ("months", month - 1)]
         terms = normalized(query).split()
         matches = []
-        for key, (title, tags, rows, rule) in self.terms.items():
+        for key, (title, title_atoms, tags, rows, row_atoms, rule) in self.terms.items():
             if not terms:
-                matches.append((0, key, None))
+                matches.append((0, 0, key, None))
                 continue
             scores = []
             best_row = None
             best_score = 0
-            for i, fields in enumerate(rows):
-                row_score = sum(5 if term in fields else 2 if any(term in f for f in fields) else 0 for term in terms)
+            for i, (fields, atoms) in enumerate(zip(rows, row_atoms)):
+                row_score = 0
+                for term in terms:
+                    if term in fields:
+                        row_score += 8
+                    elif term in atoms:
+                        row_score += 6
+                    elif any(term in f for f in fields):
+                        row_score += 2
                 if row_score > best_score:
                     best_row, best_score = i, row_score
+
+            is_exact_particle = len(terms) == 1 and key == "particle-" + terms[0]
             for term in terms:
-                if term == title:
-                    score = 10
+                if is_exact_particle or term == title:
+                    score = 16
+                elif term in title_atoms:
+                    score = 13
                 elif any(term in fields for fields in rows):
-                    score = 8
+                    score = 11
+                elif any(term in atoms for atoms in row_atoms):
+                    score = 9
                 elif term in title:
                     score = 7
                 elif term in tags:
@@ -223,6 +266,21 @@ class ReferenceIndex:
                     break
                 scores.append(score)
             if len(scores) == len(terms):
-                matches.append((-sum(scores), key, best_row))
-        matches.sort(key=lambda m:m[0])
-        return [(key, row) for _, key, row in matches]
+                # 基礎主題（數字／日曆／假名／助詞／逐步拆解）在同分時優先於大量句型子字串
+                group_tiebreak = 1 if key.startswith("pattern-") else 0
+                matches.append((-sum(scores), group_tiebreak, key, best_row))
+        matches.sort(key=lambda m: (m[0], m[1]))
+        return [(key, row) for _, _, key, row in matches]
+
+
+_INDEX_CACHE: dict[tuple[int, int], ReferenceIndex] = {}
+
+
+def get_reference_index(grammar) -> ReferenceIndex:
+    """快取 ReferenceIndex，避免每次開啟語法與詞彙地圖時重複建構索引。"""
+    cache_key = (id(grammar), len(getattr(grammar, "patterns", ())))
+    cached = _INDEX_CACHE.get(cache_key)
+    if cached is None:
+        cached = ReferenceIndex(grammar)
+        _INDEX_CACHE[cache_key] = cached
+    return cached

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import os
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -16,7 +17,6 @@ from galgame_anki.adapters.base import (
     PlatformAdapter,
 )
 from galgame_anki.adapters.hook_engine import is_textractor_installed
-from galgame_anki.adapters.ocr_engine import list_tesseract_japanese_langs
 from galgame_anki.core.anki_client import is_ankiconnect_installed_locally
 
 # 過濾掉 Wine 內建背景服務進程，只保留實際遊戲執行檔
@@ -49,15 +49,14 @@ class LinuxWaylandAdapter(PlatformAdapter):
         session = os.environ.get("XDG_SESSION_TYPE", "unknown")
         anki_installed = (
             shutil.which("anki") is not None
-            or (Path.home() / ".var" / "app" / "net.ankiweb.Anki").exists()
+            or (Path("/var/lib/flatpak/app/net.ankiweb.Anki")).exists()
+            or (Path.home() / ".local" / "share" / "flatpak" / "app" / "net.ankiweb.Anki").exists()
         )
-        jp_ocr_langs = list_tesseract_japanese_langs()
         tools = {
             "anki": anki_installed,
             "ankiconnect_addon": is_ankiconnect_installed_locally(),
             "wine": shutil.which("wine") is not None,
             "textractor_hook": is_textractor_installed(),
-            "tesseract_jpn_ocr": "jpn" in jp_ocr_langs,
             "wl-paste": shutil.which("wl-paste") is not None,
             "spectacle": shutil.which("spectacle") is not None,
             "ffmpeg": shutil.which("ffmpeg") is not None,
@@ -66,19 +65,17 @@ class LinuxWaylandAdapter(PlatformAdapter):
         if tools["textractor_hook"]:
             notes.append("✓ 內建 TextractorCLI (x86/x64) 自動 Hook 引擎已就緒，啟動遊戲將自動注入擷取台詞。")
         else:
-            notes.append("ℹ 尚未下載內建 TextractorCLI，首次啟動遊戲或開啟「🪝 Hook 管理」時會自動下載。")
-        if tools["tesseract_jpn_ocr"] and tools["spectacle"]:
-            notes.append("✓ 已偵測到 Tesseract 日語 OCR + Spectacle，支援「📷 一鍵框選對話框 OCR」兜底。")
+            notes.append("尚未下載內建 TextractorCLI，首次啟動遊戲或開啟「連線與 Hook 管理」時會自動下載。")
         if session == "wayland" and tools["wl-paste"]:
             notes.append("✓ 已偵測到 Wayland + wl-paste，支援背景自動監聽 Wine 遊戲剪貼簿文本。")
         elif session == "wayland":
-            notes.append("⚠ Wayland 環境建議安裝 wl-clipboard (wl-paste)，才能在遊戲全螢幕/失焦時監聽剪貼簿。")
+            notes.append("Wayland 環境建議安裝 wl-clipboard (wl-paste)，才能在遊戲全螢幕/失焦時監聽剪貼簿。")
         if tools["wine"]:
             notes.append("✓ 已偵測到 Wine，可直接從本工具以日區環境（ja_JP.UTF-8）一鍵啟動生肉 Galgame。")
         if tools["ffmpeg"]:
             notes.append("✓ 已偵測到 FFmpeg，支援遊戲解包純人聲轉碼 MP3 與 mpv 原聲／截圖擷取。")
         if not tools["ankiconnect_addon"]:
-            notes.append("ℹ 尚未在本機 Anki 外掛目錄偵測到 AnkiConnect (2055492159)，請在 Anki 中安裝並重啟。")
+            notes.append("尚未在本機 Anki 外掛目錄偵測到 AnkiConnect (2055492159)，請在 Anki 中安裝並重啟。")
 
         return EnvironmentDiagnostics(
             platform_name=self.platform_name,
@@ -135,7 +132,14 @@ class LinuxWaylandAdapter(PlatformAdapter):
         if not exe_path.exists():
             raise FileNotFoundError(f"找不到遊戲執行檔：{exe_path}")
 
-        wine_bin = launcher_cmd.strip() or shutil.which("wine") or "wine"
+        raw_launcher = launcher_cmd.strip()
+        if raw_launcher:
+            try:
+                launcher_parts = shlex.split(raw_launcher) or [raw_launcher]
+            except ValueError:
+                launcher_parts = [raw_launcher]
+        else:
+            launcher_parts = [shutil.which("wine") or "wine"]
         env = os.environ.copy()
         env["LANG"] = locale
         env["LC_ALL"] = locale
@@ -143,7 +147,7 @@ class LinuxWaylandAdapter(PlatformAdapter):
         env["TZ"] = "Asia/Tokyo"
 
         proc = subprocess.Popen(
-            [wine_bin, str(exe_path)],
+            [*launcher_parts, str(exe_path)],
             cwd=str(exe_path.parent),
             env=env,
             stdout=subprocess.DEVNULL,
@@ -154,6 +158,8 @@ class LinuxWaylandAdapter(PlatformAdapter):
 
     def capture_screenshot_webp(self) -> tuple[bytes, str] | None:
         """透過 KDE Spectacle 擷取當前活動視窗，並轉為輕量 WebP（若可用）。"""
+        if os.environ.get("QT_QPA_PLATFORM", "").lower() in ("offscreen", "minimal"):
+            return None
         spectacle = shutil.which("spectacle")
         if not spectacle:
             return None
@@ -178,10 +184,10 @@ class LinuxWaylandAdapter(PlatformAdapter):
             try:
                 from PIL import Image
 
-                img = Image.open(io.BytesIO(raw_png))
-                img.thumbnail((960, 540))
-                buf = io.BytesIO()
-                img.save(buf, format="WEBP", quality=78)
-                return buf.getvalue(), f"gal_{ts}.webp"
+                with Image.open(io.BytesIO(raw_png)) as img:
+                    img.thumbnail((960, 540))
+                    buf = io.BytesIO()
+                    img.save(buf, format="WEBP", quality=78)
+                    return buf.getvalue(), f"gal_{ts}.webp"
             except Exception:
                 return raw_png, f"gal_{ts}.png"

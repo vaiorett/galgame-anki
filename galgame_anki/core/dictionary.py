@@ -320,10 +320,12 @@ def classify_entry_language(entry: DictEntry) -> str:
     if entry.dict_kind == "monolingual":
         return "ja"
     low = (entry.dict_name or "").lower()
-    if any(k in low for k in ("jmdict", "jitendex", "en-")) or low in ("en", "english"):
-        return "en"
-    if any(k in low for k in ("ja-zh", "zh", "中", "雙語", "双语", "漢", "汉")):
+    if any(k in low for k in ("ja-zh", "zh", "中", "雙語", "双语", "漢", "汉", "繁", "簡")):
         return "zh"
+    if any(k in low for k in ("jmdict", "jitendex", "en-")) or re.search(
+        r"(?:^|[^a-z])(?:en|eng|english)(?:$|[^a-z])", low
+    ):
+        return "en"
     sample = " ".join(entry.glosses[:2])
     return "zh" if _is_chinese_gloss(sample) else "en"
 
@@ -807,12 +809,42 @@ def _extract_yomitan_text(node: Any) -> str:
     return str(node)
 
 
+_DICT_EN_WORD_RE = re.compile(r"(?:^|[^a-z])(?:en|eng|english|ja-en|jp-en)(?:$|[^a-z])")
+_MAX_ZIP_JSON_BYTES = 100 * 1024 * 1024  # 單一 Yomitan bank JSON 解壓上限 100 MB（防 zip bomb）
+
+
+def _read_zip_json_safe(zf: zipfile.ZipFile, name: str, max_bytes: int = _MAX_ZIP_JSON_BYTES) -> Any:
+    info = zf.getinfo(name)
+    if info.file_size > max_bytes:
+        raise ValueError(f"詞典檔案 {name} 解壓後大小超過安全上限（{max_bytes // (1024 * 1024)} MB）。")
+    chunks: list[bytes] = []
+    total = 0
+    with zf.open(info, "r") as fh:
+        while True:
+            buf = fh.read(1024 * 1024)
+            if not buf:
+                break
+            total += len(buf)
+            if total > max_bytes:
+                raise ValueError(f"詞典檔案 {name} 實際解壓大小超過安全上限（{max_bytes // (1024 * 1024)} MB）。")
+            chunks.append(buf)
+    return json.loads(b"".join(chunks).decode("utf-8"))
+
+
 def _guess_dict_kind(title: str, sample_gloss: str = "") -> str:
     """自動推斷匯入詞典是雙語還是日日單語。"""
     lower = title.lower()
-    if any(k in lower for k in ("ja-ja", "大辞林", "大辞泉", "明鏡", "新明解", "広辞苑", "三省堂", "国語", "旺文社", "岩波", "monolingual")):
+    if any(
+        k in lower
+        for k in (
+            "ja-ja", "wty-ja-ja", "大辞林", "大辞泉", "明鏡", "新明解", "広辞苑",
+            "三省堂", "国語", "旺文社", "岩波", "monolingual",
+            "daijisen", "daijirin", "kojien", "koujien", "meikyo", "shinmeikai",
+            "sanseido", "kokugo", "obunsha", "iwanami", "pixiv",
+        )
+    ):
         return "monolingual"
-    if any(k in lower for k in ("ja-zh", "zh", "中", "jmdict", "jitendex", "en", "雙語", "双语", "漢", "汉")):
+    if any(k in lower for k in ("ja-zh", "zh", "中", "jmdict", "jitendex", "雙語", "双语", "漢", "汉")) or _DICT_EN_WORD_RE.search(lower):
         return "bilingual"
     # 若釋義含大量假名且幾乎無中文常見簡繁助字/英文單字，視為單語
     kana_count = len(re.findall(r"[ぁ-んァ-ン]", sample_gloss))
@@ -844,6 +876,7 @@ class DictionaryEngine:
             """
             PRAGMA journal_mode=WAL;
             PRAGMA synchronous=NORMAL;
+            PRAGMA busy_timeout=5000;
 
             CREATE TABLE IF NOT EXISTS dictionaries (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -878,27 +911,34 @@ class DictionaryEngine:
 
             CREATE INDEX IF NOT EXISTS idx_terms_term ON terms(term);
             CREATE INDEX IF NOT EXISTS idx_terms_reading ON terms(reading);
+            CREATE INDEX IF NOT EXISTS idx_terms_dict ON terms(dict_id);
             CREATE INDEX IF NOT EXISTS idx_meta_term ON term_meta(term);
+            CREATE INDEX IF NOT EXISTS idx_meta_dict ON term_meta(dict_id);
+            CREATE INDEX IF NOT EXISTS idx_meta_mode_term ON term_meta(mode, term);
             """
         )
         # 安全遷移既有資料庫：補上可選欄位（舊庫完全相容，不遺失任何已安裝詞典）
         cols = {row["name"] for row in cur.execute("PRAGMA table_info(dictionaries)").fetchall()}
         if "enabled" not in cols:
             cur.execute("ALTER TABLE dictionaries ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1")
+            cols.add("enabled")
         if "source_id" not in cols:
             cur.execute("ALTER TABLE dictionaries ADD COLUMN source_id TEXT NOT NULL DEFAULT ''")
+            cols.add("source_id")
         if "license" not in cols:
             cur.execute("ALTER TABLE dictionaries ADD COLUMN license TEXT NOT NULL DEFAULT ''")
+            cols.add("license")
+        self._has_source_col = "source_id" in cols
+        self._has_lic_col = "license" in cols
         self._conn.commit()
 
     def list_dictionaries(self) -> list[dict[str, Any]]:
+        extra_sel = ""
+        if getattr(self, "_has_source_col", True):
+            extra_sel += ", source_id"
+        if getattr(self, "_has_lic_col", True):
+            extra_sel += ", license"
         with self._lock:
-            cols = {row["name"] for row in self._conn.execute("PRAGMA table_info(dictionaries)").fetchall()}
-            extra_sel = ""
-            if "source_id" in cols:
-                extra_sel += ", source_id"
-            if "license" in cols:
-                extra_sel += ", license"
             rows = self._conn.execute(
                 f"SELECT id, name, kind, revision, entry_count, priority, enabled{extra_sel} "
                 "FROM dictionaries ORDER BY priority ASC, id ASC"
@@ -1151,13 +1191,15 @@ class DictionaryEngine:
         source_id: str | None = None,
         license_text: str | None = None,
     ) -> dict[str, Any]:
-        """原子化匯入 Yomitan .zip 詞典：先寫入暫存版本，確認成功才切換並保留使用者原本的啟用與排序設定。"""
+        """原子化匯入 Yomitan .zip 詞典：鎖外解壓與解析 JSON（防鎖死查詞執行緒），鎖內批量寫入並原子切換。"""
         with zipfile.ZipFile(zip_path, "r") as zf:
             names = zf.namelist()
             if "index.json" not in names:
                 raise ValueError("此壓縮檔不含 index.json，非標準 Yomitan 詞典格式。")
 
-            index_data = json.loads(zf.read("index.json").decode("utf-8"))
+            index_data = _read_zip_json_safe(zf, "index.json", max_bytes=4 * 1024 * 1024)
+            if not isinstance(index_data, dict):
+                raise ValueError("index.json 格式錯誤。")
             title = str(index_data.get("title") or zip_path.stem)
             revision = str(index_data.get("revision") or "")
             final_license = str(
@@ -1173,228 +1215,221 @@ class DictionaryEngine:
             if not term_banks and not meta_banks:
                 raise ValueError("此詞典壓縮檔不含 term_bank 或 term_meta_bank 資料。")
 
+            total_files = max(1, len(term_banks) + len(meta_banks))
+            processed = 0
             sample_gloss = ""
-            if term_banks:
-                first_entries = json.loads(zf.read(term_banks[0]).decode("utf-8"))
-                for row in first_entries[:10]:
-                    if len(row) >= 6:
-                        txt = _extract_yomitan_text(row[5]).strip()
+            parsed_terms: list[tuple[str, str, str, int, str]] = []
+            parsed_meta: list[tuple[str, str, str, str]] = []
+
+            # 鎖外完成全部 ZIP 解壓與 JSON 解析，避免匯入大詞典時卡住懸停查詞
+            for bank_idx, bank_name in enumerate(term_banks):
+                entries = _read_zip_json_safe(zf, bank_name)
+                if not isinstance(entries, list):
+                    raise ValueError(f"{bank_name} 格式錯誤（非陣列）。")
+                if bank_idx == 0:
+                    for row in entries[:10]:
+                        if isinstance(row, list) and len(row) >= 6:
+                            txt = _extract_yomitan_text(row[5]).strip()
+                            if txt:
+                                sample_gloss += txt + " "
+                for row in entries:
+                    if not isinstance(row, list) or len(row) < 6:
+                        continue
+                    term = str(row[0] or "").strip()
+                    reading = str(row[1] or "").strip() or term
+                    tags = str(row[2] or "")
+                    rules = str(row[3] or "")
+                    pos = ",".join(p for p in (rules, tags) if p)
+                    score = int(row[4] or 0) if isinstance(row[4], (int, float)) else 0
+                    raw_glosses = row[5]
+                    gloss_list: list[str] = []
+                    if isinstance(raw_glosses, list):
+                        for g in raw_glosses:
+                            txt = re.sub(r"\n{2,}", "\n", _extract_yomitan_text(g)).strip()
+                            if txt:
+                                gloss_list.append(txt)
+                    else:
+                        txt = _extract_yomitan_text(raw_glosses).strip()
                         if txt:
-                            sample_gloss += txt + " "
+                            gloss_list.append(txt)
 
-            if kind_override:
-                kind = kind_override
-            elif not term_banks and meta_banks:
-                kind = "meta"
-            else:
-                kind = _guess_dict_kind(title, sample_gloss)
-
-            with self._lock:
-                cols = {row["name"] for row in self._conn.execute("PRAGMA table_info(dictionaries)").fetchall()}
-                has_source_col = "source_id" in cols
-                has_lic_col = "license" in cols
-
-                existing = None
-                if stable_source and has_source_col:
-                    existing = self._conn.execute(
-                        "SELECT id, enabled, priority FROM dictionaries WHERE source_id = ?",
-                        (stable_source,),
-                    ).fetchone()
-                if existing is None:
-                    existing = self._conn.execute(
-                        "SELECT id, enabled, priority FROM dictionaries WHERE name = ?",
-                        (title,),
-                    ).fetchone()
-
-                if existing is not None:
-                    old_id = int(existing["id"])
-                    keep_enabled = int(existing["enabled"])
-                    priority = int(existing["priority"])
-                else:
-                    old_id = None
-                    keep_enabled = 1
-                    if priority_override is not None:
-                        priority = priority_override
-                    elif kind == "bilingual":
-                        priority = 5 if any(k in title.lower() for k in ("zh", "中", "漢", "汉")) else 20
-                    elif kind == "monolingual":
-                        priority = 15
-                    else:
-                        priority = 40
-
-                cur = self._conn.cursor()
-                staging_name = f"{title}::__staging_{uuid.uuid4().hex[:8]}"
-                cur.execute("SAVEPOINT galanki_dict_import")
-                try:
-                    if has_source_col and has_lic_col:
-                        cur.execute(
-                            "INSERT INTO dictionaries (name, kind, revision, entry_count, priority, enabled, source_id, license) "
-                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                            (staging_name, kind, revision, 0, priority, keep_enabled, stable_source, final_license),
-                        )
-                    else:
-                        cur.execute(
-                            "INSERT INTO dictionaries (name, kind, revision, entry_count, priority, enabled) "
-                            "VALUES (?, ?, ?, ?, ?, ?)",
-                            (staging_name, kind, revision, 0, priority, keep_enabled),
-                        )
-                    dict_id = cur.lastrowid
-
-                    total_files = max(1, len(term_banks) + len(meta_banks))
-                    processed = 0
-                    total_terms = 0
-                    total_meta = 0
-                    batch: list[tuple[Any, ...]] = []
-
-                    for bank_name in term_banks:
-                        entries = json.loads(zf.read(bank_name).decode("utf-8"))
-                        if not isinstance(entries, list):
-                            raise ValueError(f"{bank_name} 格式錯誤（非陣列）。")
-                        for row in entries:
-                            if not isinstance(row, list) or len(row) < 6:
-                                continue
-                            term = str(row[0] or "").strip()
-                            reading = str(row[1] or "").strip() or term
-                            tags = str(row[2] or "")
-                            rules = str(row[3] or "")
-                            pos = ",".join(p for p in (rules, tags) if p)
-                            score = int(row[4] or 0) if isinstance(row[4], (int, float)) else 0
-                            raw_glosses = row[5]
-                            gloss_list: list[str] = []
-                            if isinstance(raw_glosses, list):
-                                for g in raw_glosses:
-                                    txt = re.sub(r"\n{2,}", "\n", _extract_yomitan_text(g)).strip()
-                                    if txt:
-                                        gloss_list.append(txt)
-                            else:
-                                txt = _extract_yomitan_text(raw_glosses).strip()
-                                if txt:
-                                    gloss_list.append(txt)
-
-                            if not term or not gloss_list:
-                                continue
-                            if reading == term and gloss_list:
-                                rm = re.search(r"【([ぁ-んァ-ンー]+)】", gloss_list[0].splitlines()[0])
-                                if rm:
-                                    reading = rm.group(1)
-                            batch.append(
-                                (dict_id, term, reading, pos, score, json.dumps(gloss_list, ensure_ascii=False))
-                            )
-                            total_terms += 1
-                            if len(batch) >= 5000:
-                                cur.executemany(
-                                    "INSERT INTO terms (dict_id, term, reading, pos, score, glosses_json) VALUES (?, ?, ?, ?, ?, ?)",
-                                    batch,
-                                )
-                                batch.clear()
-
-                        processed += 1
-                        if progress:
-                            progress(f"匯入詞條 {title} ({processed}/{total_files})", int(processed * 100 / total_files))
-
-                    if batch:
-                        cur.executemany(
-                            "INSERT INTO terms (dict_id, term, reading, pos, score, glosses_json) VALUES (?, ?, ?, ?, ?, ?)",
-                            batch,
-                        )
-                        batch.clear()
-
-                    meta_batch: list[tuple[Any, ...]] = []
-                    for bank_name in meta_banks:
-                        entries = json.loads(zf.read(bank_name).decode("utf-8"))
-                        if not isinstance(entries, list):
-                            raise ValueError(f"{bank_name} 格式錯誤（非陣列）。")
-                        for row in entries:
-                            if not isinstance(row, list) or len(row) < 3:
-                                continue
-                            term = str(row[0] or "").strip()
-                            mode = str(row[1] or "").strip()
-                            data = row[2]
-                            reading = ""
-                            if isinstance(data, dict):
-                                reading = str(data.get("reading") or "")
-                            if mode == "pitch" and isinstance(data, dict):
-                                positions = [
-                                    str(p.get("position"))
-                                    for p in data.get("pitches", [])
-                                    if isinstance(p, dict) and p.get("position") is not None
-                                ]
-                                if positions:
-                                    meta_batch.append(
-                                        (dict_id, term, reading, "pitch", json.dumps({"pitches": positions}))
-                                    )
-                                    total_meta += 1
-                            elif mode == "freq":
-                                freq_val = None
-                                if isinstance(data, int):
-                                    freq_val = data
-                                elif isinstance(data, dict):
-                                    fv = data.get("frequency", data.get("value"))
-                                    if isinstance(fv, dict):
-                                        fv = fv.get("value")
-                                    if isinstance(fv, int):
-                                        freq_val = fv
-                                if freq_val is not None:
-                                    meta_batch.append(
-                                        (dict_id, term, reading, "freq", json.dumps({"frequency": freq_val}))
-                                    )
-                                    total_meta += 1
-                            if len(meta_batch) >= 5000:
-                                cur.executemany(
-                                    "INSERT INTO term_meta (dict_id, term, reading, mode, data_json) VALUES (?, ?, ?, ?, ?)",
-                                    meta_batch,
-                                )
-                                meta_batch.clear()
-
-                        processed += 1
-                        if progress:
-                            progress(f"匯入音調/詞頻 {title} ({processed}/{total_files})", int(processed * 100 / total_files))
-
-                    if meta_batch:
-                        cur.executemany(
-                            "INSERT INTO term_meta (dict_id, term, reading, mode, data_json) VALUES (?, ?, ?, ?, ?)",
-                            meta_batch,
-                        )
-
-                    final_count = total_terms if total_terms > 0 else total_meta
-                    if final_count == 0:
-                        raise ValueError("此詞典壓縮檔解析後沒有任何可用詞條，已取消切換並保留原版本。")
-
-                    # 新版本匯入驗證成功後，才移除舊版本並原子切換為正式名稱
-                    if old_id is not None:
-                        cur.execute("DELETE FROM terms WHERE dict_id = ?", (old_id,))
-                        cur.execute("DELETE FROM term_meta WHERE dict_id = ?", (old_id,))
-                        cur.execute("DELETE FROM dictionaries WHERE id = ?", (old_id,))
-                    # 若另有同名舊紀錄（例如不同版本標題相同）一併清理
-                    dup = cur.execute(
-                        "SELECT id FROM dictionaries WHERE name = ? AND id != ?",
-                        (title, dict_id),
-                    ).fetchone()
-                    if dup is not None:
-                        cur.execute("DELETE FROM terms WHERE dict_id = ?", (dup["id"],))
-                        cur.execute("DELETE FROM term_meta WHERE dict_id = ?", (dup["id"],))
-                        cur.execute("DELETE FROM dictionaries WHERE id = ?", (dup["id"],))
-
-                    cur.execute(
-                        "UPDATE dictionaries SET name = ?, entry_count = ? WHERE id = ?",
-                        (title, final_count, dict_id),
+                    if not term or not gloss_list:
+                        continue
+                    if reading == term and gloss_list:
+                        rm = re.search(r"【([ぁ-んァ-ンー]+)】", gloss_list[0].splitlines()[0])
+                        if rm:
+                            reading = rm.group(1)
+                    parsed_terms.append(
+                        (term, reading, pos, score, json.dumps(gloss_list, ensure_ascii=False))
                     )
-                    cur.execute("RELEASE SAVEPOINT galanki_dict_import")
-                    self._conn.commit()
-                except Exception:
+
+                processed += 1
+                if progress:
+                    progress(f"解析詞條 {title} ({processed}/{total_files})", int(processed * 75 / total_files))
+
+            for bank_name in meta_banks:
+                entries = _read_zip_json_safe(zf, bank_name)
+                if not isinstance(entries, list):
+                    raise ValueError(f"{bank_name} 格式錯誤（非陣列）。")
+                for row in entries:
+                    if not isinstance(row, list) or len(row) < 3:
+                        continue
+                    term = str(row[0] or "").strip()
+                    mode = str(row[1] or "").strip()
+                    data = row[2]
+                    reading = ""
+                    if isinstance(data, dict):
+                        reading = str(data.get("reading") or "")
+                    if mode == "pitch" and isinstance(data, dict):
+                        positions = [
+                            str(p.get("position"))
+                            for p in data.get("pitches", [])
+                            if isinstance(p, dict) and p.get("position") is not None
+                        ]
+                        if positions:
+                            parsed_meta.append(
+                                (term, reading, "pitch", json.dumps({"pitches": positions}))
+                            )
+                    elif mode == "freq":
+                        freq_val = None
+                        if isinstance(data, int):
+                            freq_val = data
+                        elif isinstance(data, dict):
+                            fv = data.get("frequency", data.get("value"))
+                            if isinstance(fv, dict):
+                                fv = fv.get("value")
+                            if isinstance(fv, int):
+                                freq_val = fv
+                        if freq_val is not None:
+                            parsed_meta.append(
+                                (term, reading, "freq", json.dumps({"frequency": freq_val}))
+                            )
+
+                processed += 1
+                if progress:
+                    progress(f"解析音調/詞頻 {title} ({processed}/{total_files})", int(processed * 75 / total_files))
+
+        if kind_override:
+            kind = kind_override
+        elif not term_banks and meta_banks:
+            kind = "meta"
+        else:
+            kind = _guess_dict_kind(title, sample_gloss)
+
+        final_count = len(parsed_terms) if parsed_terms else len(parsed_meta)
+        if final_count == 0:
+            raise ValueError("此詞典壓縮檔解析後沒有任何可用詞條，已取消切換並保留原版本。")
+
+        with self._lock:
+            has_source_col = getattr(self, "_has_source_col", True)
+            has_lic_col = getattr(self, "_has_lic_col", True)
+
+            existing = None
+            if stable_source and has_source_col:
+                existing = self._conn.execute(
+                    "SELECT id, enabled, priority FROM dictionaries WHERE source_id = ?",
+                    (stable_source,),
+                ).fetchone()
+            if existing is None:
+                existing = self._conn.execute(
+                    "SELECT id, enabled, priority FROM dictionaries WHERE name = ?",
+                    (title,),
+                ).fetchone()
+
+            if existing is not None:
+                old_id = int(existing["id"])
+                keep_enabled = int(existing["enabled"])
+                priority = int(existing["priority"])
+            else:
+                old_id = None
+                keep_enabled = 1
+                if priority_override is not None:
+                    priority = priority_override
+                elif kind == "bilingual":
+                    priority = 5 if any(k in title.lower() for k in ("zh", "中", "漢", "汉")) else 20
+                elif kind == "monolingual":
+                    priority = 15
+                else:
+                    priority = 40
+
+            cur = self._conn.cursor()
+            staging_name = f"{title}::__staging_{uuid.uuid4().hex[:8]}"
+            cur.execute("SAVEPOINT galanki_dict_import")
+            try:
+                if has_source_col and has_lic_col:
+                    cur.execute(
+                        "INSERT INTO dictionaries (name, kind, revision, entry_count, priority, enabled, source_id, license) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (staging_name, kind, revision, 0, priority, keep_enabled, stable_source, final_license),
+                    )
+                else:
+                    cur.execute(
+                        "INSERT INTO dictionaries (name, kind, revision, entry_count, priority, enabled) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (staging_name, kind, revision, 0, priority, keep_enabled),
+                    )
+                dict_id = cur.lastrowid
+
+                for idx in range(0, len(parsed_terms), 5000):
+                    chunk = [(dict_id, *row) for row in parsed_terms[idx : idx + 5000]]
+                    cur.executemany(
+                        "INSERT INTO terms (dict_id, term, reading, pos, score, glosses_json) VALUES (?, ?, ?, ?, ?, ?)",
+                        chunk,
+                    )
+
+                for idx in range(0, len(parsed_meta), 5000):
+                    chunk = [(dict_id, *row) for row in parsed_meta[idx : idx + 5000]]
+                    cur.executemany(
+                        "INSERT INTO term_meta (dict_id, term, reading, mode, data_json) VALUES (?, ?, ?, ?, ?)",
+                        chunk,
+                    )
+
+                if progress:
+                    progress(f"寫入資料庫 {title}...", 92)
+
+                # 新版本匯入驗證成功後，才移除舊版本並原子切換為正式名稱
+                if old_id is not None:
+                    cur.execute("DELETE FROM terms WHERE dict_id = ?", (old_id,))
+                    cur.execute("DELETE FROM term_meta WHERE dict_id = ?", (old_id,))
+                    cur.execute("DELETE FROM dictionaries WHERE id = ?", (old_id,))
+                dup = cur.execute(
+                    "SELECT id FROM dictionaries WHERE name = ? AND id != ?",
+                    (title, dict_id),
+                ).fetchone()
+                if dup is not None:
+                    cur.execute("DELETE FROM terms WHERE dict_id = ?", (dup["id"],))
+                    cur.execute("DELETE FROM term_meta WHERE dict_id = ?", (dup["id"],))
+                    cur.execute("DELETE FROM dictionaries WHERE id = ?", (dup["id"],))
+
+                cur.execute(
+                    "UPDATE dictionaries SET name = ?, entry_count = ? WHERE id = ?",
+                    (title, final_count, dict_id),
+                )
+                cur.execute("RELEASE SAVEPOINT galanki_dict_import")
+                self._conn.commit()
+            except Exception:
+                try:
                     cur.execute("ROLLBACK TO SAVEPOINT galanki_dict_import")
                     cur.execute("RELEASE SAVEPOINT galanki_dict_import")
                     self._conn.commit()
-                    raise
+                except sqlite3.Error:
+                    try:
+                        self._conn.rollback()
+                    except sqlite3.Error:
+                        pass
+                raise
 
-                return {
-                    "id": dict_id,
-                    "name": title,
-                    "kind": kind,
-                    "revision": revision,
-                    "source_id": stable_source,
-                    "entry_count": final_count,
-                }
+            if progress:
+                progress(f"完成匯入 {title}", 100)
+
+            return {
+                "id": dict_id,
+                "name": title,
+                "kind": kind,
+                "revision": revision,
+                "source_id": stable_source,
+                "entry_count": final_count,
+            }
 
     def download_and_import_free_dictionary(
         self,
@@ -1471,14 +1506,12 @@ class DictionaryEngine:
         return results
 
     def _query_exact(self, word: str) -> list[DictEntry]:
-        with self._lock:
-            rows = self._conn.execute(
-                """
+        _base_sql = """
                 SELECT t.term, t.reading, t.pos, t.score, t.glosses_json,
                        d.name AS dict_name, d.kind AS dict_kind, d.priority
                 FROM terms t
                 JOIN dictionaries d ON d.id = t.dict_id
-                WHERE d.enabled = 1 AND (t.term = ? OR t.reading = ?)
+                WHERE d.enabled = 1 AND {kind_cond} AND (t.term = ? OR t.reading = ?)
                 ORDER BY
                     (CASE WHEN t.term = ? THEN 0 ELSE 1 END),
                     (CASE
@@ -1489,10 +1522,22 @@ class DictionaryEngine:
                     END),
                     d.priority ASC,
                     t.score DESC
-                LIMIT 36
-                """,
+                LIMIT {limit}
+        """
+        with self._lock:
+            bi_rows = self._conn.execute(
+                _base_sql.format(kind_cond="d.kind != 'monolingual'", limit=32),
                 (word, word, word),
             ).fetchall()
+            mono_rows = self._conn.execute(
+                _base_sql.format(kind_cond="d.kind = 'monolingual'", limit=18),
+                (word, word, word),
+            ).fetchall()
+        # 依原本詞典優先序合併雙語與單語結果，確保單語條目永不被大量雙語條目擠出 LIMIT
+        rows = sorted(
+            list(bi_rows) + list(mono_rows),
+            key=lambda r: (0 if r["term"] == word else 1, r["priority"], -r["score"]),
+        )
 
         entries: list[DictEntry] = []
         for r in rows:
@@ -1523,6 +1568,58 @@ class DictionaryEngine:
 
         entries.sort(key=_rank_entry)
         return entries
+
+    def get_top_freq_terms(self, max_freq: int = 35000, limit: int = 35000) -> list[tuple[str, int]]:
+        """執行緒安全地回傳高頻詞清單 (term, freq)；若無詞頻表則回退至雙語詞典詞頭。"""
+        try:
+            with self._lock:
+                rows = self._conn.execute(
+                    """
+                    SELECT m.term, MIN(CAST(json_extract(m.data_json, '$.frequency') AS INT)) AS freq
+                    FROM term_meta m
+                    JOIN dictionaries d ON d.id = m.dict_id
+                    WHERE d.enabled = 1 AND m.mode = 'freq'
+                    GROUP BY m.term
+                    HAVING freq IS NOT NULL AND freq <= ?
+                    ORDER BY freq ASC
+                    LIMIT ?
+                    """,
+                    (max_freq, limit),
+                ).fetchall()
+            if rows:
+                return [(str(r["term"] or "").strip(), int(r["freq"])) for r in rows if r["term"]]
+            with self._lock:
+                t_rows = self._conn.execute(
+                    """
+                    SELECT DISTINCT t.term FROM terms t
+                    JOIN dictionaries d ON d.id = t.dict_id
+                    WHERE d.enabled = 1 AND d.kind = 'bilingual'
+                    LIMIT 12000
+                    """
+                ).fetchall()
+            return [(str(r["term"] or "").strip(), idx) for idx, r in enumerate(t_rows, start=1) if r["term"]]
+        except Exception:
+            return []
+
+    def query_homophones(self, reading: str, exclude_term: str = "", limit: int = 28) -> list[str]:
+        """執行緒安全地查詢同讀音、不同寫法的候選詞頭（供聯想記憶樹使用）。"""
+        if not reading:
+            return []
+        try:
+            with self._lock:
+                rows = self._conn.execute(
+                    """
+                    SELECT DISTINCT t.term FROM terms t
+                    JOIN dictionaries d ON d.id = t.dict_id
+                    WHERE d.enabled = 1 AND d.kind = 'bilingual'
+                      AND t.reading = ? AND t.term != ?
+                    LIMIT ?
+                    """,
+                    (reading, exclude_term, limit),
+                ).fetchall()
+            return [str(r["term"]) for r in rows if r["term"]]
+        except Exception:
+            return []
 
     def _query_meta(self, term: str, reading: str) -> tuple[list[str], int | None]:
         with self._lock:

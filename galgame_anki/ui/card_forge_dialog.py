@@ -80,12 +80,14 @@ class CardForgeDialog(QDialog):
         pack_translation: str = "",
         related_words_html: str = "",
         related_words_preview: str = "",
+        theme_name: str = "",
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("編輯 Anki 卡片")
         self.resize(610, 540)
 
+        self._theme_name = theme_name or getattr(getattr(parent, "config", None), "ui_theme", "sakura")
         self._raw_sentence = raw_sentence
         self._pitch_accent = pitch_accent
         self._pack_translation = pack_translation
@@ -175,8 +177,7 @@ class CardForgeDialog(QDialog):
         self.reading_edit.textChanged.connect(self._refresh_pitch_graph)
         row_word.addWidget(self.reading_edit)
 
-        parent_theme = getattr(getattr(self.parent(), "config", None), "ui_theme", "sakura")
-        self._dark_mode = parent_theme == "starlight"
+        self._dark_mode = self._theme_name == "starlight"
         self.pitch_widget = PitchGraphWidget(compact=True, dark_mode=self._dark_mode)
         row_word.addWidget(self.pitch_widget)
         row_word.addStretch()
@@ -227,7 +228,7 @@ class CardForgeDialog(QDialog):
         dl.setSpacing(6)
 
         dl_head = QLabel("本句核心釋義")
-        dl_head.setStyleSheet("font-weight: 700; background: transparent;")
+        dl_head.setStyleSheet("font-weight: 500; background: transparent;")
         dl.addWidget(dl_head)
 
         if self._bi_senses:
@@ -423,7 +424,7 @@ class CardForgeDialog(QDialog):
 
     def _on_trans_ok(self, text: str) -> None:
         self.trans_btn.setEnabled(True)
-        self.trans_btn.setText("🌐 核對句意")
+        self.trans_btn.setText("核對句意")
         if text:
             self.trans_edit.setText(text)
             # 取得本句自然譯文後，若原先有多個義項，自動按語境重疊度將最符合這句話的義項排第 1
@@ -440,7 +441,7 @@ class CardForgeDialog(QDialog):
 
     def _on_trans_fail(self, _err: str) -> None:
         self.trans_btn.setEnabled(True)
-        self.trans_btn.setText("🌐 核對句意")
+        self.trans_btn.setText("核對句意")
         self.trans_edit.setPlaceholderText("離線無法連線，可直接輸入你自己的理解或貼上 Gemini/GPT 譯文")
 
     def _confirm(self) -> None:

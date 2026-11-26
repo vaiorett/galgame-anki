@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import re
@@ -21,6 +22,20 @@ from pathlib import Path
 from typing import Any, Callable
 
 from galgame_anki.config import get_data_dir
+
+_MAX_ZLIB_BYTES = 128 * 1024 * 1024
+
+
+def _safe_zlib_decompress(data: bytes, max_bytes: int = _MAX_ZLIB_BYTES) -> bytes:
+    """帶解壓大小上限的 zlib 解壓，防止惡意或損毀封包觸發記憶體炸彈。"""
+    decomp = zlib.decompressobj()
+    out = decomp.decompress(data, max_bytes + 1)
+    if len(out) > max_bytes or decomp.unconsumed_tail:
+        raise ValueError(f"壓縮資料解壓後超過安全上限（{max_bytes // (1024 * 1024)} MB）。")
+    tail = decomp.flush()
+    if len(out) + len(tail) > max_bytes:
+        raise ValueError(f"壓縮資料解壓後超過安全上限（{max_bytes // (1024 * 1024)} MB）。")
+    return out + tail
 
 DEFAULT_FORMATS_DAT_URLS = (
     "https://raw.githubusercontent.com/crskycode/GARbro/master/ArcFormats/Resources/Formats.dat",
@@ -313,9 +328,11 @@ def find_cx_scheme_for_game(
     formats_dat_path: Path | None = None,
 ) -> CxSchemeParams | None:
     """從 Formats.dat 依遊戲執行檔名／資料夾名稱自動尋找對應的 Kirikiri CxEncryption 參數。"""
-    # 1. 若已提取單一遊戲 JSON 快取，優先秒讀
+    # 1. 若已提取單一遊戲 JSON 快取，優先秒讀（含路徑雜湊避免不同遊戲同名資料夾互撞）
+    resolved_dir = str(game_dir.resolve())
+    dir_hash = hashlib.sha1(resolved_dir.encode("utf-8")).hexdigest()[:8]
     safe_dir_key = re.sub(r"[^\w.-]+", "_", game_dir.name).strip("_") or "game"
-    scheme_cache = cached_schemes_dir() / f"{safe_dir_key}.json"
+    scheme_cache = cached_schemes_dir() / f"{safe_dir_key}_{dir_hash}.json"
     if scheme_cache.exists():
         try:
             d = json.loads(scheme_cache.read_text(encoding="utf-8"))
@@ -337,11 +354,15 @@ def find_cx_scheme_for_game(
     blob = dat_path.read_bytes()
     if not blob.startswith(b"GARbroDB") or len(blob) < 16:
         raise ValueError("無效的 Formats.dat 檔案格式。")
-    raw = zlib.decompress(blob[12:])
+    raw = _safe_zlib_decompress(blob[12:], max_bytes=64 * 1024 * 1024)
     objs = _parse_formats_dat_nrbf(raw)
 
     def deref(v: Any) -> Any:
+        seen_oids: set[int] = set()
         while isinstance(v, _NrbfRef):
+            if v.oid in seen_oids:
+                return None
+            seen_oids.add(v.oid)
             v = objs.get(v.oid)
         return v
 
@@ -703,17 +724,26 @@ def list_xp3_entries(xp3_path: Path) -> list[Xp3EntryMeta]:
             raise ValueError(f"非標準 XP3 封包標頭：{xp3_path.name}")
         idx_off = struct.unpack("<Q", f.read(8))[0]
         f.seek(idx_off)
+        seen_idx_offs: set[int] = set()
         while True:
-            fl = f.read(1)[0]
+            if idx_off in seen_idx_offs or len(seen_idx_offs) >= 32:
+                raise ValueError(f"XP3 索引跳轉異常（偵測到循環或過深）：{xp3_path.name}")
+            seen_idx_offs.add(idx_off)
+            fl_b = f.read(1)
+            if not fl_b:
+                raise ValueError(f"XP3 索引表不完整：{xp3_path.name}")
+            fl = fl_b[0]
             if fl & 0x80:
                 _, idx_off = struct.unpack("<QQ", f.read(16))
                 f.seek(idx_off)
                 continue
             if fl & 1:
                 csz, _rsz = struct.unpack("<QQ", f.read(16))
-                raw = zlib.decompress(f.read(csz))
+                raw = _safe_zlib_decompress(f.read(csz))
             else:
                 rsz = struct.unpack("<Q", f.read(8))[0]
+                if rsz > _MAX_ZLIB_BYTES:
+                    raise ValueError(f"XP3 索引表大小異常：{xp3_path.name}")
                 raw = f.read(rsz)
             break
 
@@ -730,7 +760,7 @@ def list_xp3_entries(xp3_path: Path) -> list[Xp3EntryMeta]:
 
         if tag == b"hnfn" and len(chunk) >= 6:
             ad, nlen = struct.unpack("<IH", chunk[:6])
-            name = chunk[6 : 6 + nlen * 2].decode("utf-16le", errors="replace")
+            name = chunk[6 : 6 + nlen * 2].decode("utf-16le", errors="replace").replace("\\", "/")
             hnfn_names.append((ad, name))
         elif tag == b"File":
             sp = 0
@@ -746,7 +776,7 @@ def list_xp3_entries(xp3_path: Path) -> list[Xp3EntryMeta]:
                 sp += 12 + ss
                 if st == b"info" and len(sc) >= 22:
                     flags, orig_sz, _asz, nlen = struct.unpack("<IQQH", sc[:22])
-                    fname = sc[22 : 22 + nlen * 2].decode("utf-16le", errors="replace")
+                    fname = sc[22 : 22 + nlen * 2].decode("utf-16le", errors="replace").replace("\\", "/")
                 elif st == b"segm":
                     for i in range(0, len(sc), 28):
                         segs.append(struct.unpack("<IQQQ", sc[i : i + 28]))
@@ -799,7 +829,7 @@ def read_xp3_entry_bytes(
             f.seek(offset)
             d = f.read(asz)
             if cflags & 1:
-                d = zlib.decompress(d)
+                d = _safe_zlib_decompress(d)
             buf.extend(d)
     raw = bytes(buf)
     if meta.flags and decryptor is not None:
@@ -819,6 +849,8 @@ def _read_psb_int_arr(data: bytes, offset: int) -> tuple[list[int], int]:
     start = offset + 1 + size_bytes + 1
     if count == 0:
         return [], start
+    if not (1 <= elem_sz <= 8) or start + count * elem_sz > len(data):
+        raise ValueError(f"PSB 整數陣列長度越界 @ {offset:#x}")
     vals = [
         int.from_bytes(data[start + i * elem_sz : start + (i + 1) * elem_sz], "little")
         for i in range(count)
@@ -829,7 +861,7 @@ def _read_psb_int_arr(data: bytes, offset: int) -> tuple[list[int], int]:
 def parse_psb_tree(data: bytes) -> dict[str, Any] | list[Any] | None:
     """解析 M2 PSB v2/v3（含 MDF 壓縮封裝）為 Python 字典／陣列樹。"""
     if data[:4] == b"mdf\x00" and len(data) > 8:
-        data = zlib.decompress(data[8:])
+        data = _safe_zlib_decompress(data[8:])
     if data[:4] != b"PSB\x00":
         raise ValueError("非標準 PSB 劇本檔案")
 
@@ -844,11 +876,20 @@ def parse_psb_tree(data: bytes) -> dict[str, Any] | list[Any] | None:
     name_indexes, _ = _read_psb_int_arr(data, p)
 
     names: list[str] = []
+    max_trie_steps = max(16, len(names_data))
     for index in name_indexes:
+        if not (0 <= index < len(names_data)):
+            raise ValueError("PSB 名稱索引越界")
         bs = bytearray()
         c = names_data[index]
+        steps = 0
         while c != 0:
+            steps += 1
+            if steps > max_trie_steps or not (0 <= c < len(names_data)):
+                raise ValueError("PSB 名稱 trie 結構異常或存在循環")
             code = names_data[c]
+            if not (0 <= code < len(charset)):
+                raise ValueError("PSB 名稱字元集索引越界")
             bs.append((c - charset[code]) & 0xFF)
             c = code
         bs.reverse()
@@ -863,7 +904,9 @@ def parse_psb_tree(data: bytes) -> dict[str, Any] | list[Any] | None:
             s1 = len(data)
         return data[s0:s1].decode("utf-8", errors="replace")
 
-    def read_obj(o: int) -> Any:
+    def read_obj(o: int, depth: int = 0) -> Any:
+        if depth > 64:
+            raise ValueError("PSB 物件嵌套深度超過安全上限")
         t = data[o]
         if t == 0x01:
             return None
@@ -886,11 +929,11 @@ def parse_psb_tree(data: bytes) -> dict[str, Any] | list[Any] | None:
             return struct.unpack("<d", data[o + 1 : o + 9])[0]
         if t == 0x20:
             offsets, body = _read_psb_int_arr(data, o + 1)
-            return [read_obj(body + x) for x in offsets]
+            return [read_obj(body + x, depth + 1) for x in offsets]
         if t == 0x21:
             ki, p2 = _read_psb_int_arr(data, o + 1)
             vo, body = _read_psb_int_arr(data, p2)
-            return {names[ki[i]]: read_obj(body + vo[i]) for i in range(len(ki))}
+            return {names[ki[i]]: read_obj(body + vo[i], depth + 1) for i in range(len(ki))}
         return None
 
     return read_obj(off_entries)

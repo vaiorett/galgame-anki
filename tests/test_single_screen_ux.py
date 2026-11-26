@@ -36,7 +36,8 @@ class TestSingleScreenUX(unittest.TestCase):
 
     def test_defaults_and_kwin_scripts_for_single_screen_mode(self) -> None:
         cfg = AppConfig()
-        self.assertTrue(cfg.start_in_tray_overlay)
+        # 預設啟動直接顯示主視窗，覆蓋層需手動開啟（不自動隱藏主頁）
+        self.assertFalse(cfg.start_in_tray_overlay)
         self.assertTrue(cfg.auto_launch_anki)
         self.assertFalse(cfg.quick_forge_before_mine)
 
@@ -75,6 +76,7 @@ class TestSingleScreenUX(unittest.TestCase):
     def test_one_click_direct_mine_undo_and_shift_forge_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cfg = AppConfig(
+                anki_url="http://127.0.0.1:1",
                 ws_enabled=False,
                 clipboard_watch=False,
                 auto_sync_known_words=False,
@@ -218,6 +220,7 @@ class TestSingleScreenUX(unittest.TestCase):
 
             # 4) 檢查工具選單名稱精簡無 emoji
             cfg = AppConfig(
+                anki_url="http://127.0.0.1:1",
                 ws_enabled=False,
                 clipboard_watch=False,
                 auto_sync_known_words=False,

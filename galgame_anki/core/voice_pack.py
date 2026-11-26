@@ -119,39 +119,61 @@ def classify_solo_line_character(speaker: str, voice_id: str) -> tuple[str, str]
     return "spk:未標記角色", ""
 
 
+_KS_BREAK_RE = re.compile(r"\[(?:p|l|plc)(?:\b|\])", re.IGNORECASE)
+
+
+def _decode_ks_bytes(raw: bytes) -> str:
+    """依序以 UTF-16LE BOM、UTF-8、CP932 (Shift-JIS) 解碼 Kirikiri `.ks` 腳本。"""
+    if raw.startswith(b"\xff\xfe"):
+        return raw.decode("utf-16le", errors="ignore")
+    if raw.startswith(b"\xef\xbb\xbf"):
+        return raw.decode("utf-8-sig", errors="ignore")
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("cp932", errors="replace")
+
+
+def _escape_sql_like(text: str) -> str:
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def _decode_audio_bytes_to_pcm24k(audio_bytes: bytes, ext: str = ".ogg") -> bytes:
     """將單一語音位元組解碼為 24kHz mono s16le PCM（供無縫拼接濃縮聽力與計算精確 LRC 時間戳）。"""
     if not audio_bytes:
         return b""
     suffix = ext.lower() if ext.startswith(".") else f".{ext.lower()}"
-    with tempfile.NamedTemporaryFile(prefix="galanki_dec_", suffix=suffix, delete=True) as tf:
-        tf.write(audio_bytes)
-        tf.flush()
-        try:
-            res = subprocess.run(
-                [
-                    "ffmpeg",
-                    "-y",
-                    "-v",
-                    "error",
-                    "-i",
-                    tf.name,
-                    "-ac",
-                    "1",
-                    "-ar",
-                    "24000",
-                    "-f",
-                    "s16le",
-                    "pipe:1",
-                ],
-                capture_output=True,
-                timeout=15,
-                check=False,
-            )
-            if res.returncode == 0 and res.stdout:
-                return res.stdout
-        except (OSError, subprocess.SubprocessError):
-            return b""
+    fd, tmp_str = tempfile.mkstemp(prefix="galanki_dec_", suffix=suffix)
+    tmp_path = Path(tmp_str)
+    try:
+        with open(fd, "wb") as fh:
+            fh.write(audio_bytes)
+        res = subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-v",
+                "error",
+                "-i",
+                str(tmp_path),
+                "-ac",
+                "1",
+                "-ar",
+                "24000",
+                "-f",
+                "s16le",
+                "pipe:1",
+            ],
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+        if res.returncode == 0 and res.stdout:
+            return res.stdout
+    except (OSError, subprocess.SubprocessError):
+        return b""
+    finally:
+        tmp_path.unlink(missing_ok=True)
     return b""
 
 
@@ -185,22 +207,20 @@ def _encode_audio_bytes_to_mp3(audio_bytes: bytes, ext: str = ".ogg") -> bytes |
     if not audio_bytes:
         return None
     suffix = ext.lower() if ext.startswith(".") else f".{ext.lower()}"
-    if suffix == ".opus":
-        # FFmpeg 對 Ogg-Opus 容器以副檔名 .opus / .ogg 皆可直接解析
-        fmt_hint = ".opus"
-    else:
-        fmt_hint = suffix
+    fmt_hint = ".opus" if suffix == ".opus" else suffix
 
-    with tempfile.NamedTemporaryFile(prefix="galanki_vp_", suffix=fmt_hint, delete=True) as tf:
-        tf.write(audio_bytes)
-        tf.flush()
+    fd, tmp_str = tempfile.mkstemp(prefix="galanki_vp_", suffix=fmt_hint)
+    tmp_path = Path(tmp_str)
+    try:
+        with open(fd, "wb") as fh:
+            fh.write(audio_bytes)
         cmd = [
             "ffmpeg",
             "-y",
             "-v",
             "error",
             "-i",
-            tf.name,
+            str(tmp_path),
             "-ac",
             "1",
             "-ar",
@@ -211,12 +231,13 @@ def _encode_audio_bytes_to_mp3(audio_bytes: bytes, ext: str = ".ogg") -> bytes |
             "mp3",
             "pipe:1",
         ]
-        try:
-            res = subprocess.run(cmd, capture_output=True, timeout=15, check=False)
-            if res.returncode == 0 and len(res.stdout) > 256:
-                return res.stdout
-        except (OSError, subprocess.SubprocessError):
-            return None
+        res = subprocess.run(cmd, capture_output=True, timeout=15, check=False)
+        if res.returncode == 0 and len(res.stdout) > 256:
+            return res.stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    finally:
+        tmp_path.unlink(missing_ok=True)
     return None
 
 
@@ -306,13 +327,14 @@ def _extract_dialogues_from_ks(text: str, scene_file: str, start_seq: int = 0) -
                     pending_voices.append(vid)
         if ln.startswith("*") or ln.startswith("@"):
             continue
-        # 移除行內標籤後檢查是否剩餘台詞文字
+        # 移除行內標籤後檢查是否剩餘台詞文字（以獨立標籤界定 [p]/[l]/[plc]，避免誤切 [playse]/[layer]）
         stripped = _STRIP_RUBY_KS_RE.sub("", ln).strip()
+        has_break = bool(_KS_BREAK_RE.search(ln))
         if stripped:
             buf.append(stripped)
-            if "[p" in ln or "[l" in ln or "[plc" in ln:
+            if has_break:
                 _flush()
-        elif "[p" in ln or "[plc" in ln:
+        elif has_break:
             _flush()
     _flush()
     return entries
@@ -334,6 +356,10 @@ class VoicePackManager:
         cur = self._conn.cursor()
         cur.executescript(
             """
+            PRAGMA journal_mode=WAL;
+            PRAGMA synchronous=NORMAL;
+            PRAGMA busy_timeout=5000;
+
             CREATE TABLE IF NOT EXISTS voice_packs (
                 pack_id TEXT PRIMARY KEY,
                 game_name TEXT NOT NULL,
@@ -376,6 +402,7 @@ class VoicePackManager:
             );
             CREATE INDEX IF NOT EXISTS idx_lines_pack_exact ON dialogue_lines(pack_id, norm_exact);
             CREATE INDEX IF NOT EXISTS idx_lines_pack_core ON dialogue_lines(pack_id, norm_core);
+            CREATE INDEX IF NOT EXISTS idx_lines_pack_seq ON dialogue_lines(pack_id, seq_index);
             """
         )
         self._conn.commit()
@@ -563,7 +590,7 @@ class VoicePackManager:
                 except Exception:
                     continue
             else:
-                txt = raw_bytes.decode("utf-16le", errors="ignore") if raw_bytes.startswith(b"\xff\xfe") else raw_bytes.decode("utf-8", errors="ignore")
+                txt = _decode_ks_bytes(raw_bytes)
                 extracted = _extract_dialogues_from_ks(txt, sm.internal_name, start_seq=seq_cursor)
                 lines.extend(extracted)
                 seq_cursor += len(extracted)
@@ -635,7 +662,7 @@ class VoicePackManager:
             for p in ks_files:
                 try:
                     raw = p.read_bytes()
-                    txt = raw.decode("utf-16le", errors="ignore") if raw.startswith(b"\xff\xfe") else raw.decode("utf-8", errors="ignore")
+                    txt = _decode_ks_bytes(raw)
                     extracted = _extract_dialogues_from_ks(txt, p.name, start_seq=seq)
                     lines.extend(extracted)
                     seq += len(extracted)
@@ -672,61 +699,65 @@ class VoicePackManager:
 
         with self._lock:
             cur = self._conn.cursor()
-            cur.execute("DELETE FROM dialogue_lines WHERE pack_id = ?", (pack_id,))
-            cur.execute("DELETE FROM voice_assets WHERE pack_id = ?", (pack_id,))
-            cur.execute(
-                """
-                INSERT OR REPLACE INTO voice_packs
-                    (pack_id, game_name, game_dir, mode, scheme_json, line_count, voiced_line_count, asset_count, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (pack_id, game_name, str(game_dir), mode, scheme_json, len(lines), voiced_cnt, len(assets), now),
-            )
-
-            asset_rows = []
-            for stem_l, ext, arc_or_disk, iname, adlr, flags, osz, segs_json in assets:
-                if mode == "xp3_cx":
-                    asset_rows.append((pack_id, stem_l, ext, arc_or_disk, iname, "", adlr, flags, osz, segs_json))
-                else:
-                    asset_rows.append((pack_id, stem_l, ext, "", iname, arc_or_disk, 0, 0, osz, "[]"))
-
-            cur.executemany(
-                """
-                INSERT INTO voice_assets
-                    (pack_id, stem_lower, ext, archive_path, internal_name, disk_path, adler32, flags, orig_size, segments_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                asset_rows,
-            )
-
-            line_rows = []
-            for ln in lines:
-                n_exact, n_core = normalize_dialogue_for_match(ln.clean_text)
-                if not n_exact:
-                    continue
-                line_rows.append(
-                    (
-                        pack_id,
-                        ln.seq_index,
-                        ln.scene_file,
-                        ln.speaker,
-                        ln.raw_text,
-                        ln.clean_text,
-                        n_exact,
-                        n_core,
-                        json.dumps(ln.voice_ids, ensure_ascii=False),
-                        ln.translation,
-                    )
+            try:
+                cur.execute("DELETE FROM dialogue_lines WHERE pack_id = ?", (pack_id,))
+                cur.execute("DELETE FROM voice_assets WHERE pack_id = ?", (pack_id,))
+                cur.execute(
+                    """
+                    INSERT OR REPLACE INTO voice_packs
+                        (pack_id, game_name, game_dir, mode, scheme_json, line_count, voiced_line_count, asset_count, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (pack_id, game_name, str(game_dir), mode, scheme_json, len(lines), voiced_cnt, len(assets), now),
                 )
-            cur.executemany(
-                """
-                INSERT INTO dialogue_lines
-                    (pack_id, seq_index, scene_file, speaker, raw_text, clean_text, norm_exact, norm_core, voice_ids_json, translation)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                line_rows,
-            )
-            self._conn.commit()
+
+                asset_rows = []
+                for stem_l, ext, arc_or_disk, iname, adlr, flags, osz, segs_json in assets:
+                    if mode == "xp3_cx":
+                        asset_rows.append((pack_id, stem_l, ext, arc_or_disk, iname, "", adlr, flags, osz, segs_json))
+                    else:
+                        asset_rows.append((pack_id, stem_l, ext, "", iname, arc_or_disk, 0, 0, osz, "[]"))
+
+                cur.executemany(
+                    """
+                    INSERT INTO voice_assets
+                        (pack_id, stem_lower, ext, archive_path, internal_name, disk_path, adler32, flags, orig_size, segments_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    asset_rows,
+                )
+
+                line_rows = []
+                for ln in lines:
+                    n_exact, n_core = normalize_dialogue_for_match(ln.clean_text)
+                    if not n_exact:
+                        continue
+                    line_rows.append(
+                        (
+                            pack_id,
+                            ln.seq_index,
+                            ln.scene_file,
+                            ln.speaker,
+                            ln.raw_text,
+                            ln.clean_text,
+                            n_exact,
+                            n_core,
+                            json.dumps(ln.voice_ids, ensure_ascii=False),
+                            ln.translation,
+                        )
+                    )
+                cur.executemany(
+                    """
+                    INSERT INTO dialogue_lines
+                        (pack_id, seq_index, scene_file, speaker, raw_text, clean_text, norm_exact, norm_core, voice_ids_json, translation)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    line_rows,
+                )
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
             self._decryptor_cache.pop(pack_id, None)
             self._cursors[pack_id] = 0
 
@@ -859,11 +890,11 @@ class VoicePackManager:
                     (pack.pack_id, n_core),
                 ).fetchall()
             if not rows and len(n_core) >= 8:
-                # 備援子字串比對：容許 Hook 前後多夾雜少許符號或局部行斷開
+                # 備援子字串比對：容許 Hook 前後多夾雜少許符號或局部行斷開（跳脫 LIKE 萬用字元）
                 rows = self._conn.execute(
                     "SELECT seq_index, speaker, voice_ids_json, translation FROM dialogue_lines "
-                    "WHERE pack_id = ? AND norm_core LIKE ? LIMIT 10",
-                    (pack.pack_id, f"%{n_core}%"),
+                    "WHERE pack_id = ? AND norm_core LIKE ? ESCAPE '\\' LIMIT 10",
+                    (pack.pack_id, f"%{_escape_sql_like(n_core)}%"),
                 ).fetchall()
 
         if not rows:
@@ -1031,6 +1062,55 @@ class VoicePackManager:
             ).fetchall()
         return [str(r["scene_file"]) for r in rows]
 
+    def search_recurrences(
+        self,
+        pack_id: str,
+        lemma: str,
+        limit: int = 8,
+    ) -> list[dict[str, str]]:
+        """執行緒安全地查詢同作品進度以內包含指定詞彙的防劇透例句（供聯想記憶樹呼叫）。"""
+        if not pack_id or not lemma or len(lemma) < 2:
+            return []
+        like_arg = f"%{_escape_sql_like(lemma)}%"
+        try:
+            with self._lock:
+                cur_seq = int(self._cursors.get(pack_id, 0) or 0)
+                if cur_seq > 0:
+                    rows = self._conn.execute(
+                        """
+                        SELECT scene_file, speaker, clean_text, translation
+                        FROM dialogue_lines
+                        WHERE pack_id = ? AND seq_index <= ? AND clean_text LIKE ? ESCAPE '\\'
+                          AND length(clean_text) BETWEEN 6 AND 55
+                        ORDER BY seq_index DESC
+                        LIMIT ?
+                        """,
+                        (pack_id, cur_seq, like_arg, limit),
+                    ).fetchall()
+                else:
+                    rows = self._conn.execute(
+                        """
+                        SELECT scene_file, speaker, clean_text, translation
+                        FROM dialogue_lines
+                        WHERE pack_id = ? AND clean_text LIKE ? ESCAPE '\\'
+                          AND length(clean_text) BETWEEN 6 AND 55
+                        ORDER BY seq_index ASC
+                        LIMIT ?
+                        """,
+                        (pack_id, like_arg, limit),
+                    ).fetchall()
+            return [
+                {
+                    "scene_file": str(r["scene_file"] or ""),
+                    "speaker": str(r["speaker"] or ""),
+                    "clean_text": str(r["clean_text"] or ""),
+                    "translation": str(r["translation"] or ""),
+                }
+                for r in rows
+            ]
+        except Exception:
+            return []
+
     def _scene_seq_bounds(
         self,
         pack_id: str,
@@ -1040,22 +1120,24 @@ class VoicePackManager:
         min_seq: int | None = None
         max_seq: int | None = None
         with self._lock:
-            if start_scene:
+            def _scene_range(scene: str) -> tuple[int, int] | None:
                 row = self._conn.execute(
-                    "SELECT MIN(seq_index) AS v FROM dialogue_lines WHERE pack_id = ? AND scene_file = ?",
-                    (pack_id, start_scene),
+                    "SELECT MIN(seq_index) AS lo, MAX(seq_index) AS hi FROM dialogue_lines WHERE pack_id = ? AND scene_file = ?",
+                    (pack_id, scene),
                 ).fetchone()
-                if row and row["v"] is not None:
-                    min_seq = int(row["v"])
-            if end_scene:
-                row = self._conn.execute(
-                    "SELECT MAX(seq_index) AS v FROM dialogue_lines WHERE pack_id = ? AND scene_file = ?",
-                    (pack_id, end_scene),
-                ).fetchone()
-                if row and row["v"] is not None:
-                    max_seq = int(row["v"])
-        if min_seq is not None and max_seq is not None and min_seq > max_seq:
-            min_seq, max_seq = max_seq, min_seq
+                if row and row["lo"] is not None and row["hi"] is not None:
+                    return int(row["lo"]), int(row["hi"])
+                return None
+
+            s_rng = _scene_range(start_scene) if start_scene else None
+            e_rng = _scene_range(end_scene) if end_scene else None
+            if s_rng and e_rng:
+                min_seq = min(s_rng[0], e_rng[0])
+                max_seq = max(s_rng[1], e_rng[1])
+            elif s_rng:
+                min_seq = s_rng[0]
+            elif e_rng:
+                max_seq = e_rng[1]
         return min_seq, max_seq
 
     def list_pack_characters(
@@ -1277,6 +1359,10 @@ class VoicePackManager:
             if progress_cb:
                 progress_cb(f"[{char_idx}/{len(char_keys)}] 正在解碼「{char_name}」的 {len(lines)} 句純人聲...")
 
+            # 以暫存檔接收 stderr，防止長匯出過程 FFmpeg stderr 管線寫滿 64 KB 造成死鎖
+            stderr_fd, stderr_str = tempfile.mkstemp(prefix="galanki_fferr_", suffix=".log")
+            stderr_path = Path(stderr_str)
+            stderr_fh = open(stderr_fd, "wb")
             enc = subprocess.Popen(
                 [
                     "ffmpeg",
@@ -1298,7 +1384,7 @@ class VoicePackManager:
                     str(mp3_path),
                 ],
                 stdin=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stderr=stderr_fh,
             )
 
             lrc_lines: list[str] = [
@@ -1353,23 +1439,36 @@ class VoicePackManager:
                                 f"[{char_idx}/{len(char_keys)}] 「{char_name}」進度 {done}/{len(lines)} 句 ({elapsed_sec / 60:.1f} 分鐘)..."
                             )
                 enc.stdin.close()
-                stderr_b = enc.stderr.read() if enc.stderr else b""
-                if enc.stderr:
-                    enc.stderr.close()
                 rc = enc.wait(timeout=60)
+                stderr_fh.close()
+                stderr_txt = stderr_path.read_text(encoding="utf-8", errors="ignore").strip() if stderr_path.exists() else ""
                 if rc != 0:
-                    raise RuntimeError(
-                        f"FFmpeg 編碼「{char_name}」失敗：{stderr_b.decode('utf-8', errors='ignore').strip()}"
-                    )
+                    raise RuntimeError(f"FFmpeg 編碼「{char_name}」失敗：{stderr_txt}")
             except Exception:
-                if enc.stdin and not enc.stdin.closed:
-                    enc.stdin.close()
-                if enc.stderr and not enc.stderr.closed:
-                    enc.stderr.close()
-                enc.kill()
-                enc.wait()
+                try:
+                    if enc.stdin and not enc.stdin.closed:
+                        enc.stdin.close()
+                except OSError:
+                    pass
+                try:
+                    enc.kill()
+                    enc.wait(timeout=5)
+                except (OSError, subprocess.SubprocessError):
+                    pass
+                try:
+                    if not stderr_fh.closed:
+                        stderr_fh.close()
+                except OSError:
+                    pass
                 mp3_path.unlink(missing_ok=True)
                 raise
+            finally:
+                try:
+                    if not stderr_fh.closed:
+                        stderr_fh.close()
+                except OSError:
+                    pass
+                stderr_path.unlink(missing_ok=True)
 
             if written_lines == 0 or not mp3_path.exists():
                 mp3_path.unlink(missing_ok=True)

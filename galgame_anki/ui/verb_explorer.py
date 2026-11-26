@@ -4,7 +4,7 @@ from html import escape
 from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QTextBrowser, QVBoxLayout, QWidget
 
 from galgame_anki.core.verb_lesson import EXAMPLES, FORMS, GROUPS, VerbLesson, build_lesson
-from galgame_anki.ui.theme import get_palette
+from galgame_anki.ui.theme import apply_soft_bold_document, get_palette
 
 
 class VerbExplorer(QWidget):
@@ -28,6 +28,7 @@ class VerbExplorer(QWidget):
         choices.addStretch()
         layout.addLayout(choices)
         self.page = QTextBrowser()
+        apply_soft_bold_document(self.page)
         layout.addWidget(self.page)
         self.verbs.currentIndexChanged.connect(self.render)
         self.forms.currentIndexChanged.connect(self.render)

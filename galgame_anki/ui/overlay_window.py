@@ -200,7 +200,7 @@ class OverlaySizeDialog(QDialog):
         preset_style = (
             f"QPushButton {{ background-color: {p.bg_card}; color: {p.text_primary}; "
             f"border: 1px solid {p.border}; border-radius: 8px; padding: 5px 8px; "
-            f"font-size: 12px; font-weight: 600; }}"
+            f"font-size: 12px; font-weight: 500; }}"
             f"QPushButton:hover {{ border-color: {p.accent_pink}; color: {p.accent_pink}; }}"
             f"QPushButton:pressed {{ background-color: {p.pill_info_bg}; }}"
         )
@@ -341,6 +341,8 @@ class OverlayWindow(QWidget):
     merge_prev_requested = Signal()
     open_console_requested = Signal()
     audio_preview_requested = Signal()
+    workbench_requested = Signal(object, str, str, object, object)
+    queue_study_requested = Signal(str, str, str)
     visibility_changed = Signal(bool)
     replace_mode_changed = Signal(bool)
     always_on_top_changed = Signal(bool)
@@ -384,9 +386,12 @@ class OverlayWindow(QWidget):
         self._freeflow_mode = False
         self._saved_normal_size = (OVERLAY_DEFAULT_WIDTH, OVERLAY_DEFAULT_HEIGHT)
         self._initial_saved_geom: tuple[int, int, int, int] | None = None
+        self._last_valid_pos: tuple[int, int] = (-1, -1)
         self._mpv_connected = False
         self._locked = False
         self._hover_lookup = True
+        self._blind_listen = False
+        self._blind_revealed = False
         self._always_on_top = True
         self._replace_mode = True
         self._backdrop = "vn_dark"
@@ -407,6 +412,8 @@ class OverlayWindow(QWidget):
         self.popup.mine_requested.connect(self._on_popup_mine)
         self.popup.copy_prompt_requested.connect(self._on_popup_copy_prompt)
         self.popup.audio_preview_requested.connect(self.audio_preview_requested.emit)
+        self.popup.workbench_requested.connect(self.workbench_requested.emit)
+        self.popup.queue_study_requested.connect(self.queue_study_requested.emit)
         self.popup.hover_entered.connect(self._on_popup_hover_enter)
         self.popup.hover_left.connect(self._on_popup_hover_leave)
 
@@ -474,6 +481,11 @@ class OverlayWindow(QWidget):
         subtitles.setContentsMargins(0, 0, 0, 0)
         subtitles.setSpacing(4)
         subtitles.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.blind_hint_label = QLabel("盲聽中 · 移入滑鼠或按 ↺ 核對字幕")
+        self.blind_hint_label.setWordWrap(True)
+        self.blind_hint_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.blind_hint_label.hide()
+        subtitles.addWidget(self.blind_hint_label)
         subtitles.addWidget(self.sentence_widget)
         box.addWidget(self.scroll_area, 1)
 
@@ -614,6 +626,12 @@ class OverlayWindow(QWidget):
         self.act_hover.triggered.connect(self._toggle_hover_lookup)
         menu.addAction(self.act_hover)
 
+        self.act_blind_listen = QAction("先聽後看（盲聽模式）", self)
+        self.act_blind_listen.setCheckable(True)
+        self.act_blind_listen.setChecked(False)
+        self.act_blind_listen.triggered.connect(self._toggle_blind_listen)
+        menu.addAction(self.act_blind_listen)
+
         menu.addSeparator()
 
         playback = menu.addMenu("播放與字幕")
@@ -658,6 +676,7 @@ class OverlayWindow(QWidget):
     def _on_replay_clicked(self) -> None:
         self._popup_hide_timer.stop()
         self.popup.hide()
+        self.reveal_blind_subtitle()
         if self._uses_mpv_transport():
             self.replay_requested.emit()
         else:
@@ -704,10 +723,11 @@ class OverlayWindow(QWidget):
             self.act_center_text.setChecked(normalized == "center")
             self.act_center_text.blockSignals(False)
         self.sentence_widget.set_text_align(normalized)
-        self.inline_trans_label.setAlignment(
-            (Qt.AlignmentFlag.AlignHCenter if normalized == "center" else Qt.AlignmentFlag.AlignLeft)
-            | Qt.AlignmentFlag.AlignVCenter
-        )
+        align_flags = (
+            Qt.AlignmentFlag.AlignHCenter if normalized == "center" else Qt.AlignmentFlag.AlignLeft
+        ) | Qt.AlignmentFlag.AlignVCenter
+        self.inline_trans_label.setAlignment(align_flags)
+        self.blind_hint_label.setAlignment(align_flags)
         self._update_layout_margins()
         if toast:
             self.show_toast("文字對齊：居中" if normalized == "center" else "文字對齊：左對齊", 1600)
@@ -900,7 +920,7 @@ class OverlayWindow(QWidget):
                 border: none;
                 border-radius: 6px;
                 padding: 0px;
-                font-weight: 700;
+                font-weight: 500;
             }}
             QFrame#OverlayCornerDock QPushButton#OverlayStepBtn {{
                 font-size: 20px;
@@ -934,15 +954,19 @@ class OverlayWindow(QWidget):
             f"color: {p.text_muted}; background: transparent; border: none;"
         )
         self.capsule_label.setStyleSheet(
-            f"font-size: 12px; color: {p.accent_pink}; font-weight: 700; border: none; background: transparent;"
+            f"font-size: 12px; color: {p.accent_pink}; font-weight: 500; border: none; background: transparent;"
         )
         toast_bg = "rgba(15, 23, 42, 0.78)" if eff_theme == "starlight" else "rgba(255, 250, 253, 0.92)"
         self.toast_label.setStyleSheet(
-            f"font-size: 11px; color: {p.accent_mint}; font-weight: 600; "
+            f"font-size: 11px; color: {p.accent_mint}; font-weight: 500; "
             f"background: {toast_bg}; border-radius: 6px; padding: 2px 7px; border: none;"
         )
         self.inline_trans_label.setStyleSheet(
             f"font-size: 13.5px; color: {p.text_secondary}; background: transparent; padding: 2px 4px;"
+        )
+        hint_fg = "#f8fafc" if self._backdrop == "transparent" else p.text_muted
+        self.blind_hint_label.setStyleSheet(
+            f"font-size: 14px; font-weight: 500; color: {hint_fg}; background: transparent; padding: 10px 6px;"
         )
         is_transparent = self._backdrop == "transparent"
         self.sentence_widget.set_display_options(
@@ -995,7 +1019,7 @@ class OverlayWindow(QWidget):
                 border-radius: 8px;
                 padding: 0px 5px;
                 font-size: 11px;
-                font-weight: 600;
+                font-weight: 500;
             }}
             QWidget#OverlayToolbar QPushButton:hover {{
                 border-color: {p.accent_pink};
@@ -1018,6 +1042,7 @@ class OverlayWindow(QWidget):
         font_size: int = 23,
         always_on_top: bool = True,
         text_align: str = "left",
+        blind_listen: bool = False,
     ) -> None:
         w = max(OVERLAY_MIN_WIDTH, min(OVERLAY_MAX_WIDTH, int(width or OVERLAY_DEFAULT_WIDTH)))
         h = max(OVERLAY_MIN_HEIGHT, min(OVERLAY_MAX_HEIGHT, int(height or OVERLAY_DEFAULT_HEIGHT)))
@@ -1029,7 +1054,12 @@ class OverlayWindow(QWidget):
         finally:
             self._suppress_resize_save = prev_suppress
         self._update_size_action_label()
-        if (x, y) != (-1, -1) and any(screen.geometry().contains(x, y) for screen in QGuiApplication.screens()):
+        # 避免還原 Wayland 合成的 (0, 0) 假座標，導致覆蓋層貼死左上角
+        is_unset_pos = (x, y) == (-1, -1) or (
+            x == 0 and y == 0 and QGuiApplication.platformName().startswith("wayland")
+        )
+        if not is_unset_pos and any(screen.geometry().contains(x, y) for screen in QGuiApplication.screens()):
+            self._last_valid_pos = (int(x), int(y))
             self._initial_saved_geom = (int(x), int(y), w, h)
             self.move(x, y)
 
@@ -1041,6 +1071,13 @@ class OverlayWindow(QWidget):
         self.act_hover.setChecked(self._hover_lookup)
         self.act_hover.blockSignals(False)
         self.sentence_widget.set_hover_lookup_enabled(self._hover_lookup)
+
+        self._blind_listen = bool(blind_listen)
+        self._blind_revealed = False
+        self.act_blind_listen.blockSignals(True)
+        self.act_blind_listen.setChecked(self._blind_listen)
+        self.act_blind_listen.blockSignals(False)
+        self._apply_blind_visibility()
 
         self._always_on_top = bool(always_on_top)
         self.act_pin.blockSignals(True)
@@ -1065,14 +1102,20 @@ class OverlayWindow(QWidget):
 
     def _emit_state(self) -> None:
         w, h = self._saved_normal_size if self._freeflow_mode else (self.width(), self.height())
+        pos_x, pos_y = self.x(), self.y()
+        if QGuiApplication.platformName().startswith("wayland") and pos_x == 0 and pos_y == 0:
+            pos_x, pos_y = self._last_valid_pos
+        elif (pos_x, pos_y) != (0, 0):
+            self._last_valid_pos = (pos_x, pos_y)
         self.state_saved.emit(
             {
-                "x": self.x(),
-                "y": self.y(),
+                "x": pos_x,
+                "y": pos_y,
                 "width": w,
                 "height": h,
                 "locked": self._locked,
                 "hover_lookup": self._hover_lookup,
+                "blind_listen": self._blind_listen,
                 "always_on_top": self._always_on_top,
                 "replace_mode": self._replace_mode,
                 "backdrop": self._backdrop,
@@ -1101,16 +1144,42 @@ class OverlayWindow(QWidget):
     def show_record(self, record: SentenceRecord) -> None:
         """在目前的視窗範圍內更新字幕。"""
         self._current_record = record
+        self._blind_revealed = False
         self._update_transport_visibility()
         self.sentence_widget.set_sentence(record.tokenized)
         self.scroll_area.verticalScrollBar().setValue(0)
         self.popup.hide()
+        self._apply_blind_visibility()
 
-        if self._show_inline_trans and (record.pack_translation or record.sentence_translation):
+    def _apply_blind_visibility(self) -> None:
+        record = self._current_record
+        if self._blind_listen and not self._blind_revealed and record is not None:
+            self.sentence_widget.hide()
+            self.inline_trans_label.hide()
+            self.blind_hint_label.show()
+            return
+        self.blind_hint_label.hide()
+        self.sentence_widget.show()
+        if record is not None and self._show_inline_trans and (record.pack_translation or record.sentence_translation):
             self.inline_trans_label.setText(record.pack_translation or record.sentence_translation)
             self.inline_trans_label.show()
         else:
             self.inline_trans_label.hide()
+
+    def reveal_blind_subtitle(self) -> None:
+        if self._blind_listen and not self._blind_revealed:
+            self._blind_revealed = True
+            self._apply_blind_visibility()
+
+    def _toggle_blind_listen(self, checked: bool) -> None:
+        self._blind_listen = bool(checked)
+        self._blind_revealed = False
+        self.act_blind_listen.blockSignals(True)
+        self.act_blind_listen.setChecked(self._blind_listen)
+        self.act_blind_listen.blockSignals(False)
+        self._apply_blind_visibility()
+        self.show_toast("盲聽模式：移入滑鼠核對字幕" if checked else "已關閉盲聽模式")
+        self._emit_state()
 
     def set_inline_translation(self, record: SentenceRecord, text: str) -> None:
         if self._current_record is record and self._show_inline_trans and text:
@@ -1299,7 +1368,10 @@ class OverlayWindow(QWidget):
             self._show_wayland_lookup(anchor_top)
             return
 
-        screen = QGuiApplication.screenAt(anchor_top) or self.screen()
+        screen = QGuiApplication.screenAt(anchor_top) or self.screen() or QGuiApplication.primaryScreen()
+        if screen is None:
+            self.popup.hide()
+            return
         subtitles = QRect(self.mapToGlobal(QPoint()), self.size())
         rect = _lookup_popup_geometry(screen.availableGeometry(), subtitles, self.popup.size(), anchor_top.x())
         if not rect.isValid():
@@ -1315,9 +1387,13 @@ class OverlayWindow(QWidget):
 
     def _show_wayland_lookup(self, anchor_top: QPoint) -> None:
         # Wayland 頂層視窗的全域座標可能是合成值。用 xdg_popup 錨定父視窗的整塊字幕。
-        area = self.screen().availableGeometry()
-        max_height = (area.height() - self.height() - 16) // 2
-        if max_height < min(self.popup.height(), 132) or area.width() <= 16:
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        if screen is None:
+            return
+        area = screen.availableGeometry()
+        free_h = area.height() - self.height() - 16
+        max_height = max(140, min(420, int(free_h * 0.65)))
+        if free_h < 132 or area.width() <= 16:
             return
         self.popup.fit_to_lookup_area(QSize(min(self.popup.width(), area.width() - 16),
                                             min(self.popup.height(), max_height)))
@@ -1436,6 +1512,7 @@ class OverlayWindow(QWidget):
         return None
 
     def _update_hover_state(self, pos: QPoint) -> None:
+        self.reveal_blind_subtitle()
         dock_hit = False
         if not self._freeflow_mode:
             dock_rect = QRect(
@@ -1520,6 +1597,7 @@ class OverlayWindow(QWidget):
         return super().event(ev)
 
     def enterEvent(self, event) -> None:  # noqa: N802
+        self.reveal_blind_subtitle()
         self._set_hover_flags(overlay_hovered=True)
         super().enterEvent(event)
 

@@ -1,19 +1,57 @@
-"""按需在程式內閱讀線上詞條。コトバンク日中詞條可直接用 Qt 閱讀。"""
+"""按需在程式內閱讀線上詞條。コトバンク日中詞條可直接用純輕量 HTML 解析器閱讀。"""
 
+from __future__ import annotations
+
+from html.parser import HTMLParser
 import re
 
 from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QTextDocumentFragment
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QHBoxLayout, QLabel, QPushButton, QTextBrowser, QVBoxLayout, QWidget,
 )
 
 from galgame_anki.core.web_lookup import WEB_LOOKUP_SITES, build_web_lookup_url, sanitize_web_query
+from galgame_anki.ui.theme import apply_soft_bold_document
+
+_BLOCK_TAGS = frozenset({"p", "div", "br", "li", "h1", "h2", "h3", "h4", "h5", "h6", "tr", "dt", "dd", "section", "article"})
+_SKIP_TAGS = frozenset({"script", "style", "noscript", "svg", "template"})
+
+
+class _PlainHtmlExtractor(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._skip_depth = 0
+        self._parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        t = tag.lower()
+        if t in _SKIP_TAGS:
+            self._skip_depth += 1
+        elif self._skip_depth == 0 and t in _BLOCK_TAGS:
+            self._parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        t = tag.lower()
+        if t in _SKIP_TAGS and self._skip_depth > 0:
+            self._skip_depth -= 1
+        elif self._skip_depth == 0 and t in _BLOCK_TAGS:
+            self._parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if self._skip_depth == 0 and data:
+            self._parts.append(data)
+
+    def get_text(self) -> str:
+        raw = "".join(self._parts)
+        return re.sub(r"\n{3,}", "\n\n", raw).strip()
 
 
 def kotobank_entry(page: str) -> str:
-    text = QTextDocumentFragment.fromHtml(page).toPlainText()
+    parser = _PlainHtmlExtractor()
+    parser.feed(page or "")
+    parser.close()
+    text = parser.get_text()
     heading = re.search(r"日中辞典\s*第\s*3\s*版\s*の解説", text)
     if not heading:
         return ""
@@ -40,7 +78,8 @@ class WebDictionaryDialog(QDialog):
         self.sources = QComboBox()
         for key, label, _ in WEB_LOOKUP_SITES:
             self.sources.addItem(label, key)
-        self.sources.setCurrentIndex(self.sources.findData(site_id))
+        idx = self.sources.findData((site_id or "kotobank").lower())
+        self.sources.setCurrentIndex(idx if idx >= 0 else 0)
         row.addWidget(self.sources, 1)
         self.original = QPushButton("閱讀原頁")
         self.original.clicked.connect(self.show_original)
@@ -52,6 +91,7 @@ class WebDictionaryDialog(QDialog):
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
         self.reader = QTextBrowser()
+        apply_soft_bold_document(self.reader)
         layout.addWidget(self.reader, 1)
         self.sources.currentIndexChanged.connect(self.load_entry)
         retry.clicked.connect(self.load_entry)
@@ -62,7 +102,19 @@ class WebDictionaryDialog(QDialog):
     def cancel_request(self) -> None:
         if self.reply is not None:
             old, self.reply = self.reply, None
-            old.abort()
+            try:
+                old.abort()
+            except RuntimeError:
+                pass
+
+    def closeEvent(self, event) -> None:
+        self.cancel_request()
+        if self.view is not None and hasattr(self.view, "stop"):
+            try:
+                self.view.stop()
+            except RuntimeError:
+                pass
+        super().closeEvent(event)
 
     def load_entry(self) -> None:
         self.cancel_request()
@@ -72,7 +124,8 @@ class WebDictionaryDialog(QDialog):
             self.show_original()
             return
         if self.view is not None:
-            self.view.stop()
+            if hasattr(self.view, "stop"):
+                self.view.stop()
             self.view.hide()
         self.original.show()
         self.reader.clear()
@@ -81,7 +134,7 @@ class WebDictionaryDialog(QDialog):
         request = QNetworkRequest(self.url())
         request.setTransferTimeout(15000)
         request.setAttribute(QNetworkRequest.Attribute.RedirectPolicyAttribute,
-                             QNetworkRequest.RedirectPolicy.SameOriginRedirectPolicy)
+                             QNetworkRequest.RedirectPolicy.NoLessSafeRedirectPolicy)
         reply = self.network.get(request)
         self.reply = reply
         reply.finished.connect(lambda: self.finish_entry(reply))
@@ -96,6 +149,11 @@ class WebDictionaryDialog(QDialog):
             detail = "查無此詞條" if code == 404 else reply.errorString()
             self.status.setText(f"コトバンク：{detail}。可切換時雨或日英辭典，也可重試。")
             return
+        if hasattr(reply, "url"):
+            final_host = (reply.url().host() or "").lower()
+            if final_host and not (final_host == "kotobank.jp" or final_host.endswith(".kotobank.jp")):
+                self.status.setText("來源網域異常，已停止讀取。")
+                return
         entry = kotobank_entry(bytes(reply.readAll()).decode("utf-8", errors="replace"))
         self.reader.setPlainText(entry)
         self.status.setText("小學館《日中辭典》第 3 版" if entry else
@@ -112,10 +170,13 @@ class WebDictionaryDialog(QDialog):
                 return
             class DictionaryPage(QWebEnginePage):
                 def acceptNavigationRequest(page, target, navigation_type, is_main_frame):
-                    if not is_main_frame:
-                        return super().acceptNavigationRequest(target, navigation_type, is_main_frame)
-                    host = self.url().host().removeprefix("www.")
-                    return target.scheme() == "https" and target.host() in {host, "www." + host}
+                    host = self.url().host().lower().removeprefix("www.")
+                    target_host = target.host().lower()
+                    allowed_host = target_host in {host, "www." + host}
+                    # 主框架與內嵌 iframe 一律嚴格限制為 HTTPS + 目標詞典網域，封鎖第三方廣告／追蹤框架
+                    if target.scheme() != "https" or not allowed_host:
+                        return False
+                    return True
 
                 def createWindow(page, _window_type):
                     return None
@@ -131,7 +192,7 @@ class WebDictionaryDialog(QDialog):
         self.view.load(self.url())
 
     def page_loaded(self, ok: bool) -> None:
-        if not self.view.isHidden():
+        if self.view is not None and not self.view.isHidden():
             self.status.setText("" if ok else "未能載入這個詞條。可切換上方辭典查同一個詞，或重試。")
 
 

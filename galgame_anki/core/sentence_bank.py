@@ -16,6 +16,7 @@ from typing import Any, Callable
 from galgame_anki.core.context_meaning import format_contextual_meaning
 from galgame_anki.core.dictionary import DictionaryEngine
 from galgame_anki.core.tokenizer import (
+    COMMON_FUNCTION_WORDS,
     JapaneseTokenizer,
     Token,
     TokenizedSentence,
@@ -73,18 +74,53 @@ class SentenceBankScanner:
     def __init__(self, tokenizer: JapaneseTokenizer, dictionary: DictionaryEngine) -> None:
         self._tokenizer = tokenizer
         self._dictionary = dictionary
-        # 快取 (pack_id, seq_index) -> list[(surface, lemma)] 的實詞列表，切換角色／門檻毫秒重掃！
-        self._morph_cache: dict[tuple[str, int], list[tuple[str, str]]] = {}
+        # 快取 (pack_id, pack_stamp, seq_index) -> list[(surface, lemma)] 的實詞列表，重建索引包時自動失效！
+        self._morph_cache: dict[tuple[str, float, int], list[tuple[str, str]]] = {}
 
-    def _fast_content_lemmas(self, pack_id: str, seq_index: int, text: str) -> list[tuple[str, str]]:
-        key = (pack_id, seq_index)
+    def clear_cache(self, pack_id: str | None = None) -> None:
+        if pack_id is None:
+            self._morph_cache.clear()
+        else:
+            for k in [key for key in self._morph_cache if key[0] == pack_id]:
+                self._morph_cache.pop(k, None)
+
+    def _fast_content_lemmas(
+        self,
+        pack_id: str,
+        seq_index: int,
+        text: str,
+        pack_stamp: float = 0.0,
+    ) -> list[tuple[str, str]]:
+        key = (pack_id, pack_stamp, seq_index)
         cached = self._morph_cache.get(key)
         if cached is not None:
             return cached
 
         out: list[tuple[str, str]] = []
+        sudachi = getattr(self._tokenizer, "_sudachi", None)
+        sudachi_mode = getattr(self._tokenizer, "_sudachi_mode", None)
         janome = getattr(self._tokenizer, "_janome", None)
-        if janome is not None:
+        if sudachi is not None:
+            for m in sudachi.tokenize(text, sudachi_mode):
+                surf = m.surface()
+                if not surf or not _JP_CONTENT_CHAR_RE.search(surf):
+                    continue
+                pos = m.part_of_speech()
+                pos0 = pos[0] if pos else ""
+                pos1 = pos[1] if len(pos) > 1 else ""
+                if pos0 in _PUNCT_POS or pos0 in _FUNC_POS:
+                    continue
+                if pos0 == "名詞" and pos1 in ("非自立", "代名詞", "数詞", "数", "接尾"):
+                    continue
+                if pos0 == "動詞" and pos1 in ("非自立可能", "非自立", "接尾"):
+                    continue
+                base = m.dictionary_form() or surf
+                if surf in COMMON_FUNCTION_WORDS or base in COMMON_FUNCTION_WORDS:
+                    continue
+                if len(surf) == 1 and re.match(r"^[ぁ-んァ-ヶー]$", surf):
+                    continue
+                out.append((surf, base))
+        elif janome is not None:
             for m in janome.tokenize(text):
                 surf = m.surface
                 if not surf or not _JP_CONTENT_CHAR_RE.search(surf):
@@ -99,11 +135,13 @@ class SentenceBankScanner:
                 if pos0 == "動詞" and pos1 in ("非自立", "接尾"):
                     continue
                 base = m.base_form if (m.base_form and m.base_form != "*") else surf
+                if surf in COMMON_FUNCTION_WORDS or base in COMMON_FUNCTION_WORDS:
+                    continue
                 if len(surf) == 1 and re.match(r"^[ぁ-んァ-ヶー]$", surf):
                     continue
                 out.append((surf, base))
         else:
-            # 無 Janome 時退回簡易分詞
+            # 無 Sudachi/Janome 時退回簡易分詞
             tok = self._tokenizer.tokenize(text, set())
             for t in tok.tokens:
                 if t.is_content_word and not t.is_punctuation and not t.is_function_word:
@@ -131,6 +169,7 @@ class SentenceBankScanner:
         """從已索引遊戲劇本庫篩選高價值 1T（或 1T–2T）黃金句並按 JPDB 詞頻排序。"""
         packs = [p for p in voice_packs.list_packs() if p.pack_id == pack_id]
         pack_name = packs[0].game_name if packs else ""
+        pack_stamp = packs[0].created_at if packs else 0.0
 
         if progress_cb:
             progress_cb("正在讀取遊戲劇本索引...")
@@ -167,7 +206,7 @@ class SentenceBankScanner:
             txt = ln["clean_text"]
             if len(txt) < 4 or len(txt) > 95:
                 continue
-            pairs = self._fast_content_lemmas(pack_id, ln["seq_index"], txt)
+            pairs = self._fast_content_lemmas(pack_id, ln["seq_index"], txt, pack_stamp=pack_stamp)
             if not pairs:
                 continue
 

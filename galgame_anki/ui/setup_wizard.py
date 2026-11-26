@@ -52,8 +52,8 @@ class SetupWizardDialog(QDialog):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("🚀 GalAnki 一鍵環境初始化精靈")
-        self.resize(740, 660)
+        self.setWindowTitle("GalAnki 一鍵環境初始化精靈")
+        self.resize(720, 620)
 
         self.config = config
         self.adapter = adapter
@@ -75,15 +75,15 @@ class SetupWizardDialog(QDialog):
             "以下 3 個步驟即可完成全套一鍵製卡環境："
         )
         intro.setWordWrap(True)
-        intro.setStyleSheet("font-size: 14px; font-weight: 600;")
+        intro.setStyleSheet("font-size: 14px; font-weight: 500;")
         layout.addWidget(intro)
 
         # --- Step 1: 系統環境診斷 ---
         step1 = QFrame()
         step1.setObjectName("CardPanel")
         s1_layout = QVBoxLayout(step1)
-        s1_title = QLabel("1️⃣ 系統環境自動診斷（Linux Wayland / Wine / PipeWire & Anki）")
-        s1_title.setStyleSheet("font-weight: 700; font-size: 14px; background: transparent;")
+        s1_title = QLabel("1. 系統環境自動診斷（Linux Wayland / Wine / FFmpeg & Anki）")
+        s1_title.setStyleSheet("font-weight: 500; font-size: 14px; background: transparent;")
         s1_layout.addWidget(s1_title)
 
         self.diag_label = QLabel("")
@@ -97,7 +97,7 @@ class SetupWizardDialog(QDialog):
         s2_layout = QVBoxLayout(step2)
         s2_top = QHBoxLayout()
         s2_title = QLabel("2️⃣ 一鍵初始化 Anki（建立牌組 + 原生主題三階段模板 + 檢查 FSRS）")
-        s2_title.setStyleSheet("font-weight: 700; font-size: 14px; background: transparent;")
+        s2_title.setStyleSheet("font-weight: 500; font-size: 14px; background: transparent;")
         s2_top.addWidget(s2_title)
         s2_top.addStretch()
 
@@ -124,7 +124,7 @@ class SetupWizardDialog(QDialog):
         s3_layout = QVBoxLayout(step3)
         s3_top = QHBoxLayout()
         s3_title = QLabel("3️⃣ 免費開源詞典（推薦一鍵安裝 5 合 1 黃金搭配）")
-        s3_title.setStyleSheet("font-weight: 700; font-size: 14px; background: transparent;")
+        s3_title.setStyleSheet("font-weight: 500; font-size: 14px; background: transparent;")
         s3_top.addWidget(s3_title)
         s3_top.addStretch()
 
@@ -166,9 +166,9 @@ class SetupWizardDialog(QDialog):
 
         # --- Step 4: Hook 串接速查 ---
         hook_hint = QLabel(
-            f"💡 <b>台詞與字幕擷取（Galgame + mpv 影片）：</b>"
-            "① 點「<b>🎮 遊戲/影片</b>」可直接啟動生肉自動 Hook，或一鍵連線 mpv 本地動畫字幕；"
-            f"② 同時支援 <b>📷 框選 OCR</b>（Ctrl+Shift+O）及剪貼簿 / WebSocket (ws://{self.config.ws_host}:{self.config.ws_port})！"
+            f"<span style='font-weight:500;'>台詞與字幕擷取（Galgame + mpv 影片）：</span>"
+            "① 點「<span style='font-weight:500;'>來源</span>」可直接啟動生肉自動 Hook，或連線 mpv 本地動畫字幕；"
+            f"② 同時支援剪貼簿與本機 WebSocket (ws://{self.config.ws_host}:{self.config.ws_port})。"
         )
         hook_hint.setWordWrap(True)
         hook_hint.setObjectName("MutedLabel")
@@ -259,14 +259,14 @@ class SetupWizardDialog(QDialog):
             inst = self.dictionary.find_installed_for_catalog(cid)
             if inst is not None:
                 info.setText(
-                    f"<b>{spec['name']}</b> <span style='color:#059669; font-weight:700;'>✅ 已安裝（{inst['entry_count']:,} 筆）</span>"
+                    f"<span style='font-weight:500;'>{spec['name']}</span> <span style='color:#059669; font-weight:500;'>✅ 已安裝（{inst['entry_count']:,} 筆）</span>"
                     f"<br><span style='opacity:0.75;font-size:12px;'>{spec['description']}</span>"
                 )
                 btn.setText("↻ 重裝")
             else:
                 all_installed = False
                 info.setText(
-                    f"<b>{spec['name']}</b> <span style='opacity:0.65;'>⬜ 未安裝</span>"
+                    f"<span style='font-weight:500;'>{spec['name']}</span> <span style='opacity:0.65;'>⬜ 未安裝</span>"
                     f"<br><span style='opacity:0.75;font-size:12px;'>{spec['description']}</span>"
                 )
                 btn.setText("⬇ 安裝")

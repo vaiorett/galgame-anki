@@ -75,7 +75,7 @@ class SettingsDialog(QDialog):
         self.dict_mode_combo.addItem("強制日日單語詞典優先", "monolingual")
         af.addRow("詞典顯示策略：", self.dict_mode_combo)
 
-        self.tray_mode_chk = QCheckBox("啟動時收進系統匣，只顯示字幕覆蓋層（單螢幕隱形伴讀）")
+        self.tray_mode_chk = QCheckBox("啟動時收進系統匣並自動開啟覆蓋層（取消＝直接開啟主頁，覆蓋層需手動開啟）")
         af.addRow(self.tray_mode_chk)
 
         self.auto_launch_anki_chk = QCheckBox("啟動時自動在背景啟動 Anki 並最小化（無須手動開 Anki）")
@@ -119,6 +119,9 @@ class SettingsDialog(QDialog):
         self.overlay_align_combo.addItem("左對齊", "left")
         self.overlay_align_combo.addItem("居中對齊", "center")
         af.addRow("覆蓋層文字對齊：", self.overlay_align_combo)
+
+        self.overlay_blind_listen_chk = QCheckBox("覆蓋層先聽後看（盲聽模式：移入滑鼠或重播後核對字幕）")
+        af.addRow(self.overlay_blind_listen_chk)
 
         tabs.addTab(anki_tab, "Anki・語音與外觀")
 
@@ -189,6 +192,7 @@ class SettingsDialog(QDialog):
         align_idx = self.overlay_align_combo.findData(c.overlay_text_align)
         if align_idx >= 0:
             self.overlay_align_combo.setCurrentIndex(align_idx)
+        self.overlay_blind_listen_chk.setChecked(c.overlay_blind_listen)
 
         self.ws_enabled_chk.setChecked(c.ws_enabled)
         self.ws_port_spin.setValue(c.ws_port)
@@ -215,6 +219,7 @@ class SettingsDialog(QDialog):
         c.overlay_width = self.overlay_width_spin.value()
         c.overlay_height = self.overlay_height_spin.value()
         c.overlay_text_align = str(self.overlay_align_combo.currentData() or "left")
+        c.overlay_blind_listen = self.overlay_blind_listen_chk.isChecked()
 
         c.ws_enabled = self.ws_enabled_chk.isChecked()
         c.ws_port = self.ws_port_spin.value()

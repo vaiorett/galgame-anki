@@ -219,7 +219,7 @@ class InteractiveSentenceWidget(QWidget):
             ):
                 label_text = build_conjugated_inline_furigana(tok.surface, tok.lemma, tok.reading)
 
-            btn = QPushButton(label_text)
+            btn = QPushButton(label_text.replace("&", "&&"))
             btn.setFlat(True)
             btn.setCursor(
                 Qt.CursorShape.ArrowCursor
@@ -284,18 +284,18 @@ class InteractiveSentenceWidget(QWidget):
         bg = "transparent"
         border_bottom = "2px solid transparent"
         color = "#ffffff" if self._cinema_shadow else p.text_primary
-        weight = "600" if self._cinema_shadow else "500"
+        weight = "500" if self._cinema_shadow else "400"
 
         if selected:
             bg = p.token_selected_bg
             border_bottom = f"2px solid {p.accent_pink}"
             color = p.token_selected_fg
-            weight = "700"
+            weight = "500"
         elif tok.is_1t_candidate:
             bg = "rgba(250, 204, 21, 0.22)" if self._cinema_shadow else p.token_1t_bg
             border_bottom = f"2px solid {'#fde047' if self._cinema_shadow else p.token_1t_line}"
             color = "#fef08a" if self._cinema_shadow else p.token_1t_fg
-            weight = "700"
+            weight = "500"
         elif tok.is_function_word:
             color = "#e2e8f0" if self._cinema_shadow else p.text_muted
         elif not tok.is_known and tok.has_dict_entry:
@@ -305,9 +305,10 @@ class InteractiveSentenceWidget(QWidget):
             color = "#f1f5f9" if self._cinema_shadow else p.text_secondary
 
         hover_bg = "rgba(244, 114, 182, 0.30)" if self._cinema_shadow else p.token_hover_bg
+        hover_fg = "#ffffff" if (self._cinema_shadow or self._theme_name == "starlight") else p.text_primary
         return (
             f"QPushButton {{ background: {bg}; border: none; border-bottom: {border_bottom}; "
             f"border-radius: 6px; color: {color}; font-size: {fs}px; font-weight: {weight}; "
             f"padding: 1px 3px; }}"
-            f"QPushButton:hover {{ background: {hover_bg}; color: #ffffff; }}"
+            f"QPushButton:hover {{ background: {hover_bg}; color: {hover_fg}; }}"
         )

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThreadPool, Signal
+from PySide6.QtCore import Qt, QThreadPool, QTimer, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -57,6 +57,11 @@ class VoicePackDialog(QDialog):
         self.voice_packs = voice_packs
         self.thread_pool = thread_pool
         self._workers: list[object] = []
+        self._inspect_gen = 0
+        self._inspect_timer = QTimer(self)
+        self._inspect_timer.setSingleShot(True)
+        self._inspect_timer.setInterval(260)
+        self._inspect_timer.timeout.connect(self._run_dir_inspect)
 
         self._build_ui()
         self._export_progress.connect(self._on_condensed_progress)
@@ -71,8 +76,8 @@ class VoicePackDialog(QDialog):
         layout.setSpacing(10)
 
         intro = QLabel(
-            "<b>100% 無背景音樂・無音效純淨人聲！</b> 直接從遊戲本體 <code>.xp3</code> 封包（免拆滿硬碟，支援 <b>ATRI 等 Kirikiri CxDec</b>）"
-            "或 GARbro/FreeMote 已解包資料夾建立「<b>台詞 ↔ 純淨人聲</b>」索引；並可按<b>單一角色獨立匯出</b> AJATT 被動濃縮聽力 MP3！"
+            "<span style='font-weight:500;'>100% 無背景音樂・無音效純淨人聲！</span> 直接從遊戲本體 <code>.xp3</code> 封包（免拆滿硬碟，支援 <span style='font-weight:500;'>ATRI 等 Kirikiri CxDec</span>）"
+            "或 GARbro/FreeMote 已解包資料夾建立「<span style='font-weight:500;'>台詞 ↔ 純淨人聲</span>」索引；並可按<span style='font-weight:500;'>單一角色獨立匯出</span> AJATT 被動濃縮聽力 MP3！"
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
@@ -92,7 +97,7 @@ class VoicePackDialog(QDialog):
         al.setSpacing(7)
 
         add_title = QLabel("1️⃣ 選擇遊戲目錄一鍵建立純人聲索引（無需外接 Windows 工具）")
-        add_title.setStyleSheet("font-weight: 700; font-size: 13.5px; background: transparent;")
+        add_title.setStyleSheet("font-weight: 500; font-size: 13.5px; background: transparent;")
         al.addWidget(add_title)
 
         dir_row = QHBoxLayout()
@@ -130,7 +135,7 @@ class VoicePackDialog(QDialog):
         ll.setSpacing(7)
 
         ll_title = QLabel("2️⃣ 已安裝的純人聲遊戲索引（點選即可啟用／匯出實體解包檔）")
-        ll_title.setStyleSheet("font-weight: 700; font-size: 13.5px; background: transparent;")
+        ll_title.setStyleSheet("font-weight: 500; font-size: 13.5px; background: transparent;")
         ll.addWidget(ll_title)
 
         self.pack_list = QListWidget()
@@ -166,7 +171,7 @@ class VoicePackDialog(QDialog):
         tl.setSpacing(6)
 
         t_title = QLabel("3️⃣ 即時實測：選擇／輸入遊戲對話台詞，試聽 0% BGM 純人聲")
-        t_title.setStyleSheet("font-weight: 700; font-size: 13px; background: transparent;")
+        t_title.setStyleSheet("font-weight: 500; font-size: 13px; background: transparent;")
         tl.addWidget(t_title)
 
         sample_row = QHBoxLayout()
@@ -202,7 +207,7 @@ class VoicePackDialog(QDialog):
         cl.setSpacing(10)
 
         cond_hint = QLabel(
-            "🔒 <b>人物聲音嚴格分軌：</b>只匯出您勾選的喜歡角色；若勾選多位角色，會為<b>每位角色各自輸出獨立 MP3</b>"
+            "🔒 <span style='font-weight:500;'>人物聲音嚴格分軌：</span>只匯出您勾選的喜歡角色；若勾選多位角色，會為<span style='font-weight:500;'>每位角色各自輸出獨立 MP3</span>"
             "（絕不把兩個人的聲音混在同一份音檔中，並自動排除多人合聲與無聲過場），讓通勤／散步被動聽力 100% 純淨！"
         )
         cond_hint.setWordWrap(True)
@@ -253,7 +258,7 @@ class VoicePackDialog(QDialog):
 
         char_hdr = QHBoxLayout()
         char_title = QLabel("👤 人物聲音分類（勾選想匯出的角色，預設只勾選第 1 位主角）")
-        char_title.setStyleSheet("font-weight: 700; font-size: 13.5px; background: transparent;")
+        char_title.setStyleSheet("font-weight: 500; font-size: 13.5px; background: transparent;")
         char_hdr.addWidget(char_title)
         char_hdr.addStretch()
 
@@ -325,10 +330,30 @@ class VoicePackDialog(QDialog):
 
     def _inspect_selected_dir(self, path_str: str) -> None:
         p = Path(path_str.strip())
+        if not path_str.strip() or not p.is_dir():
+            self._inspect_timer.stop()
+            self._inspect_gen += 1
+            self.detect_label.setText("請選擇存在的遊戲資料夾。")
+            return
+        self.detect_label.setText("正在掃描資料夾內容…")
+        self._inspect_timer.start()
+
+    def _run_dir_inspect(self) -> None:
+        p = Path(self.dir_edit.text().strip())
         if not p.is_dir():
             self.detect_label.setText("請選擇存在的遊戲資料夾。")
             return
-        cap = self.voice_packs.detect_game_dir_capabilities(p)
+        self._inspect_gen += 1
+        gen = self._inspect_gen
+        w = FunctionWorker(self.voice_packs.detect_game_dir_capabilities, p)
+        w.signals.finished.connect(lambda cap, g=gen: self._on_dir_inspect_done(cap, g))
+        w.signals.failed.connect(lambda err, g=gen: self.detect_label.setText(f"掃描失敗：{err}") if g == self._inspect_gen else None)
+        self._workers.append(w)
+        self.thread_pool.start(w)
+
+    def _on_dir_inspect_done(self, cap: dict, gen: int) -> None:
+        if gen != self._inspect_gen:
+            return
         parts: list[str] = []
         if cap["xp3_count"] > 0:
             names = ", ".join(cap["xp3_names"][:5])
@@ -340,7 +365,7 @@ class VoicePackDialog(QDialog):
             )
         if not parts:
             parts.append("此目錄未直接掃到 .xp3 或劇本/語音，請確認選到遊戲安裝根目錄。")
-        self.detect_label.setText("🔍 " + " ｜ ".join(parts))
+        self.detect_label.setText(" ｜ ".join(parts))
 
     def _start_indexing(self) -> None:
         p = Path(self.dir_edit.text().strip())

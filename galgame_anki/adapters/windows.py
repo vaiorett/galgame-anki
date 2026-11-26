@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -51,7 +52,11 @@ class WindowsPlatformAdapter(PlatformAdapter):
         if not exe_path.exists():
             raise FileNotFoundError(f"找不到遊戲執行檔：{exe_path}")
         if launcher_cmd.strip():
-            cmd = [launcher_cmd.strip(), str(exe_path)]
+            try:
+                parts = shlex.split(launcher_cmd.strip(), posix=False) or [launcher_cmd.strip()]
+            except ValueError:
+                parts = [launcher_cmd.strip()]
+            cmd = [*parts, str(exe_path)]
         else:
             le = shutil.which("LEProc.exe")
             cmd = [le, str(exe_path)] if le else [str(exe_path)]

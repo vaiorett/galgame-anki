@@ -2,7 +2,31 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+
+# Qt 富文本（QTextBrowser / QLabel HTML）預設會把 <b> / <strong> / <h1-3> 渲染為 700 (Bold)，
+# 在 Noto Sans CJK TC 上偏粗；統一下調一檔至原生俐落的 500 (Medium)。
+RICHTEXT_WEIGHT_CSS = "b, strong, h1, h2, h3, h4, th { font-weight: 500; }"
+
+_SOFT_BOLD_OPEN_RE = re.compile(r"<(?:b|strong)>")
+_SOFT_BOLD_CLOSE_RE = re.compile(r"</(?:b|strong)>")
+
+
+def apply_soft_bold_document(browser: object) -> None:
+    """為 QTextBrowser 套用柔和字重樣式表，讓 <b> / <strong> / <h*> 降一檔至 500。"""
+    doc = getattr(browser, "document", lambda: None)()
+    if doc is not None:
+        doc.setDefaultStyleSheet(RICHTEXT_WEIGHT_CSS)
+
+
+def soften_rich_html(html_text: str) -> str:
+    """將 QLabel 富文本中的 <b> / <strong> 轉為 font-weight:500（避免 Qt QLabel 預設 700 過粗）。"""
+    if not html_text:
+        return html_text
+    out = _SOFT_BOLD_OPEN_RE.sub('<span style="font-weight:500;">', html_text)
+    out = _SOFT_BOLD_CLOSE_RE.sub("</span>", out)
+    return out
 
 
 @dataclass(frozen=True)
@@ -156,7 +180,7 @@ QPushButton {{
     border: 1px solid {p.border};
     border-radius: 10px;
     padding: 5px 11px;
-    font-weight: 500;
+    font-weight: 400;
 }}
 
 QPushButton:hover {{
@@ -169,15 +193,16 @@ QPushButton:pressed {{
 }}
 
 QPushButton:disabled {{
-    opacity: 0.5;
+    background-color: {p.bg_input};
     color: {p.text_muted};
+    border-color: {p.border};
 }}
 
 QPushButton#PrimaryBtn {{
     background-color: {p.accent_pink};
     color: #ffffff;
     border: 1px solid {p.accent_pink};
-    font-weight: 700;
+    font-weight: 500;
     padding: 6px 14px;
 }}
 
@@ -190,7 +215,7 @@ QPushButton#MineBtn {{
     color: #ffffff;
     border: 1px solid {p.accent_pink};
     border-radius: 12px;
-    font-weight: 700;
+    font-weight: 500;
     padding: 7px 16px;
     font-size: 13px;
 }}
@@ -204,12 +229,14 @@ QPushButton#AccentBtn {{
     color: {mine_text};
     border: 1px solid {p.accent_lilac};
     border-radius: 10px;
-    font-weight: 600;
+    font-weight: 500;
     padding: 6px 12px;
 }}
 
 QPushButton#AccentBtn:hover {{
-    opacity: 0.92;
+    background-color: {p.accent_pink};
+    border-color: {p.accent_pink};
+    color: #ffffff;
 }}
 
 QPushButton#StageBtn {{
@@ -225,7 +252,7 @@ QPushButton#StageBtn:checked {{
     background-color: {p.accent_pink};
     border-color: {p.accent_pink};
     color: #ffffff;
-    font-weight: 700;
+    font-weight: 500;
 }}
 
 QPushButton#GhostBtn {{
@@ -280,7 +307,7 @@ QTabBar::tab {{
 QTabBar::tab:selected {{
     background-color: {p.bg_card};
     color: {p.accent_pink};
-    font-weight: 700;
+    font-weight: 500;
 }}
 
 QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QComboBox {{
@@ -310,7 +337,7 @@ QTextBrowser {{
     color: {p.text_primary};
 }}
 
-QListWidget {{
+QListWidget, QTreeWidget {{
     background-color: {p.bg_surface};
     border: 1px solid {p.border};
     border-radius: 12px;
@@ -318,20 +345,30 @@ QListWidget {{
     padding: 4px;
 }}
 
-QListWidget::item {{
-    padding: 7px 9px;
+QListWidget::item, QTreeWidget::item {{
+    padding: 6px 8px;
     border-radius: 8px;
     margin: 1px 0;
 }}
 
-QListWidget::item:hover {{
+QListWidget::item:hover, QTreeWidget::item:hover {{
     background-color: {btn_hover};
 }}
 
-QListWidget::item:selected {{
+QListWidget::item:selected, QTreeWidget::item:selected {{
     background-color: {p.pill_info_bg};
     color: {p.pill_info_fg};
-    font-weight: 600;
+    font-weight: 500;
+}}
+
+QTreeWidget {{
+    show-decoration-selected: 0;
+}}
+
+QTreeWidget::branch, QTreeWidget::branch:selected, QTreeWidget::branch:hover {{
+    background-color: {p.bg_surface};
+    border-image: none;
+    image: none;
 }}
 
 QProgressBar {{
@@ -358,6 +395,24 @@ QScrollBar::handle:vertical {{
     min-height: 24px;
 }}
 
+QScrollBar:horizontal {{
+    background: transparent;
+    height: 7px;
+}}
+
+QScrollBar::handle:horizontal {{
+    background: {p.border};
+    border-radius: 3px;
+    min-width: 24px;
+}}
+
+QScrollBar::add-line, QScrollBar::sub-line {{
+    border: none;
+    background: none;
+    width: 0px;
+    height: 0px;
+}}
+
 QLabel#MutedLabel {{
     color: {p.text_muted};
     font-size: 12px;
@@ -371,7 +426,7 @@ QLabel#PillOk, QPushButton#PillOk {{
     border-radius: 10px;
     padding: 3px 9px;
     font-size: 12px;
-    font-weight: 600;
+    font-weight: 500;
 }}
 
 QLabel#PillWarn, QPushButton#PillWarn {{
@@ -381,7 +436,7 @@ QLabel#PillWarn, QPushButton#PillWarn {{
     border-radius: 10px;
     padding: 3px 9px;
     font-size: 12px;
-    font-weight: 600;
+    font-weight: 500;
 }}
 
 QLabel#PillInfo {{
@@ -390,7 +445,7 @@ QLabel#PillInfo {{
     border-radius: 10px;
     padding: 2px 9px;
     font-size: 12px;
-    font-weight: 600;
+    font-weight: 500;
 }}
 """
 

@@ -108,8 +108,16 @@ class TestVisualLearning(unittest.TestCase):
         self.assertTrue(player.isFullScreen())
         self.assertIs(self.app.focusWindow(), player.windowHandle())
         self.assertIs(popup.parentWidget(), window)
-        self.assertIn("台詞裡", popup.form_label.text())
-        self.assertEqual(popup.findChildren(QPushButton), [popup.web_btn, popup.mine_btn, popup.audio_btn, popup.prompt_btn])
+        self.assertFalse(hasattr(popup, "web_btn"))
+        self.assertFalse(hasattr(popup, "form_label"))
+        self.assertFalse(hasattr(popup, "study_link"))
+        self.assertIn("食べて", popup.conj_label.text())
+        self.assertEqual(
+            popup.findChildren(QPushButton),
+            [popup.mine_btn, popup.audio_btn, popup.workbench_btn, popup.prompt_btn],
+        )
+        for btn in popup.findChildren(QPushButton):
+            self.assertEqual(btn.focusPolicy(), Qt.FocusPolicy.NoFocus)
         received = []
         popup.audio_preview_requested.connect(lambda: received.append(True))
         QTest.mouseClick(popup.audio_btn, Qt.MouseButton.LeftButton)

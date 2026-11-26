@@ -3,16 +3,17 @@
 from __future__ import annotations
 
 import base64
+import html
 import json
 import os
 import re
 import shutil
 import sqlite3
 import subprocess
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
 
 import httpx
 
@@ -68,19 +69,36 @@ class AnkiInitReport:
 
 
 class AnkiConnectClient:
-    """封裝 AnkiConnect v6 常用操作的輕量客戶端。"""
+    """封裝 AnkiConnect v6 常用操作的輕量客戶端（共用持久連線池，低延遲、不浪費 socket）。"""
 
     def __init__(self, url: str = "http://127.0.0.1:8765", timeout: float = 8.0) -> None:
         self.url = url
         self.timeout = timeout
+        self._client_lock = threading.Lock()
+        self._client: httpx.Client | None = None
+
+    def _get_client(self) -> httpx.Client:
+        with self._client_lock:
+            if self._client is None or self._client.is_closed:
+                self._client = httpx.Client(timeout=self.timeout)
+            return self._client
+
+    def close(self) -> None:
+        with self._client_lock:
+            if self._client is not None and not self._client.is_closed:
+                try:
+                    self._client.close()
+                except Exception:
+                    pass
+            self._client = None
 
     def invoke(self, action: str, **params: Any) -> Any:
         payload = {"action": action, "version": 6, "params": params}
         try:
-            with httpx.Client(timeout=self.timeout) as client:
-                resp = client.post(self.url, json=payload)
-                resp.raise_for_status()
-                body = resp.json()
+            client = self._get_client()
+            resp = client.post(self.url, json=payload)
+            resp.raise_for_status()
+            body = resp.json()
         except httpx.HTTPError as exc:
             raise AnkiConnectError(
                 f"無法連線至 AnkiConnect ({self.url})。請確認 Anki 已啟動且已安裝外掛 {ANKICONNECT_ADDON_CODE}。"
@@ -144,10 +162,10 @@ class AnkiConnectClient:
         if not db_path.exists():
             return None
 
-        uri = f"file:{quote(str(db_path), safe='/')}?mode=ro&immutable=1"
+        uri = f"{db_path.resolve().as_uri()}?mode=ro"
         conn: sqlite3.Connection | None = None
         try:
-            conn = sqlite3.connect(uri, uri=True)
+            conn = sqlite3.connect(uri, uri=True, timeout=2.0)
             # Anki 23.10–26.x (schema 18+)：全域 FSRS 開關存在 config 資料表的 key='fsrs'
             try:
                 row = conn.execute("SELECT val FROM config WHERE key = 'fsrs'").fetchone()
@@ -246,9 +264,13 @@ class AnkiConnectClient:
         report.messages.append(f"✓ 已同步 {len(known)} 個既有學習詞彙（用於 1T 句子高亮與防重）")
         return report
 
+    @staticmethod
+    def _escape_anki_query(value: str) -> str:
+        return value.replace("\\", "\\\\").replace('"', '\\"')
+
     def fetch_known_words(self, deck_name: str | None = None, limit: int = 8000) -> set[str]:
         """從 Anki 牌組同步已建卡的單詞，用於 1T (i+1) 未知詞判定。"""
-        query = f'deck:"{deck_name}"' if deck_name else "deck:*"
+        query = f'deck:"{self._escape_anki_query(deck_name)}"' if deck_name else "deck:*"
         try:
             note_ids = self.invoke("findNotes", query=query)
         except AnkiConnectError:
@@ -278,15 +300,16 @@ class AnkiConnectClient:
     def get_today_mined_count(self, deck_name: str) -> int:
         """取得今日在指定牌組已建立的卡片數。"""
         try:
-            ids = self.invoke("findNotes", query=f'deck:"{deck_name}" added:1')
+            ids = self.invoke("findNotes", query=f'deck:"{self._escape_anki_query(deck_name)}" added:1')
             return len(ids) if isinstance(ids, list) else 0
         except AnkiConnectError:
             return 0
 
     def find_duplicates(self, deck_name: str, target_word: str) -> list[int]:
         """檢查牌組中是否已存在相同目標詞。"""
-        escaped = target_word.replace('"', '\\"')
-        query = f'deck:"{deck_name}" "TargetWord:{escaped}"'
+        escaped_deck = self._escape_anki_query(deck_name)
+        escaped = self._escape_anki_query(target_word)
+        query = f'deck:"{escaped_deck}" "TargetWord:{escaped}"'
         try:
             ids = self.invoke("findNotes", query=query)
             return list(ids) if isinstance(ids, list) else []
@@ -377,7 +400,9 @@ class AnkiConnectClient:
 
 
 def _strip_html(raw: str) -> str:
-    return re.sub(r"<[^>]+>", "", raw)
+    txt = html.unescape(re.sub(r"<[^>]+>", "", raw))
+    # 清除 Anki 常見振假名格式（如 食べる[たべる] -> 食べる）
+    return re.sub(r"\[[^\]]*\]", "", txt)
 
 
 def _anki_addons_candidates() -> list[Path]:
@@ -414,10 +439,13 @@ def detect_anki_launch_command() -> list[str] | None:
             return [str(local_app)]
         return None
 
-    # Linux: 優先檢查 Flatpak net.ankiweb.Anki
+    # Linux: 優先檢查實際安裝的 Flatpak net.ankiweb.Anki（不看卸載後仍可能殘留的 ~/.var/app）
     flatpak = shutil.which("flatpak")
     if flatpak:
-        if (Path.home() / ".var" / "app" / "net.ankiweb.Anki").exists():
+        if (
+            (Path("/var/lib/flatpak/app/net.ankiweb.Anki")).exists()
+            or (Path.home() / ".local" / "share" / "flatpak" / "app" / "net.ankiweb.Anki").exists()
+        ):
             return [flatpak, "run", "net.ankiweb.Anki"]
         try:
             res = subprocess.run(
@@ -439,7 +467,7 @@ def detect_anki_launch_command() -> list[str] | None:
 
 
 def launch_anki_background(minimize_on_wayland: bool = True) -> tuple[bool, str]:
-    """在背景啟動 Anki（並於 KDE Plasma Wayland 自動最小化一次，不佔筆電螢幕）。"""
+    """啟動本機 Anki（可選於 KDE Plasma Wayland 背景自動最小化一次，並偵測立即失敗原因）。"""
     if os.environ.get("QT_QPA_PLATFORM", "").lower() in ("offscreen", "minimal"):
         return False, "測試模式略過自動啟動 Anki"
 
@@ -455,13 +483,30 @@ def launch_anki_background(minimize_on_wayland: bool = True) -> tuple[bool, str]
         except Exception:
             pass
 
+    import tempfile
+
+    err_path = Path(tempfile.gettempdir()) / f"galanki_anki_launch_{os.getpid()}.err"
     try:
-        subprocess.Popen(
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        return True, f"已於背景啟動 Anki（{' '.join(cmd)}）並自動最小化"
+        with err_path.open("wb") as err_fh:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=err_fh,
+                start_new_session=True,
+            )
+        try:
+            rc = proc.wait(timeout=0.35)
+        except subprocess.TimeoutExpired:
+            rc = None
+        if rc is not None and rc != 0:
+            err_txt = ""
+            try:
+                err_txt = err_path.read_text(encoding="utf-8", errors="ignore").strip().splitlines()[-1]
+            except Exception:
+                err_txt = f"exit={rc}"
+            return False, f"啟動 Anki 失敗：{err_txt or f'exit={rc}'}"
+        if minimize_on_wayland:
+            return True, f"已於背景啟動 Anki（{' '.join(cmd)}）並自動最小化"
+        return True, f"已啟動 Anki（{' '.join(cmd)}）"
     except OSError as exc:
         return False, f"啟動 Anki 失敗：{exc}"

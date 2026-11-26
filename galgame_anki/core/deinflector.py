@@ -81,18 +81,27 @@ def _build_rules() -> list[DeinflectRule]:
     for compound, reason in [
         ("すぎる", "〜すぎる（過於）"),
         ("過ぎる", "〜過ぎる（過於）"),
-        ("やす", "〜やすい"),
-        ("にく", "〜にくい"),
     ]:
         # 只針對一段活用形作為後綴（如 すぎる -> すぎた）
-        if compound in ("すぎる", "過ぎる"):
-            add(compound, "る", RULE_V1, RULE_V1, reason)
-            for stem, dict_end in [
-                ("い", "う"), ("き", "く"), ("ぎ", "ぐ"), ("し", "す"),
-                ("ち", "つ"), ("に", "ぬ"), ("び", "ぶ"), ("み", "む"), ("り", "る"),
-            ]:
-                add(f"{stem}{compound}", dict_end, RULE_V1, RULE_V5, reason)
-            add(compound, "い", RULE_V1, RULE_ADJ_I, reason)
+        add(compound, "る", RULE_V1, RULE_V1, reason)
+        for stem, dict_end in [
+            ("い", "う"), ("き", "く"), ("ぎ", "ぐ"), ("し", "す"),
+            ("ち", "つ"), ("に", "ぬ"), ("び", "ぶ"), ("み", "む"), ("り", "る"),
+        ]:
+            add(f"{stem}{compound}", dict_end, RULE_V1, RULE_V5, reason)
+        add(compound, "い", RULE_V1, RULE_ADJ_I, reason)
+
+    # 〜やすい / 〜にくい（本身按い形容詞變化）
+    for adj_suffix, reason in [("やすい", "〜やすい（容易）"), ("にくい", "〜にくい（難以）")]:
+        add(adj_suffix, "る", RULE_ADJ_I, RULE_V1, reason)
+        for stem, dict_end in [
+            ("い", "う"), ("き", "く"), ("ぎ", "ぐ"), ("し", "す"),
+            ("ち", "つ"), ("に", "ぬ"), ("び", "ぶ"), ("み", "む"), ("り", "る"),
+        ]:
+            add(f"{stem}{adj_suffix}", dict_end, RULE_ADJ_I, RULE_V5, reason)
+        add(f"し{adj_suffix}", "する", RULE_ADJ_I, RULE_VS, reason)
+        add(f"き{adj_suffix}", "くる", RULE_ADJ_I, RULE_VK, reason)
+        add(f"来{adj_suffix}", "来る", RULE_ADJ_I, RULE_VK, reason)
 
     # 〜たい (願望形，本身按い形容詞變化)
     add("たい", "る", RULE_ADJ_I, RULE_V1, "願望形（〜たい）")
@@ -103,6 +112,7 @@ def _build_rules() -> list[DeinflectRule]:
         add(f"{stem}たい", dict_end, RULE_ADJ_I, RULE_V5, "願望形（〜たい）")
     add("したい", "する", RULE_ADJ_I, RULE_VS, "願望形（〜たい）")
     add("きたい", "くる", RULE_ADJ_I, RULE_VK, "願望形（〜たい）")
+    add("来たい", "来る", RULE_ADJ_I, RULE_VK, "願望形（〜たい）")
 
     # --- 3. 進行體・補助動詞（〜ている / 〜てる / 〜てしまう / 〜ちゃう / 〜ておく / 〜とく） ---
     for aux, te_form, reason in [
@@ -118,52 +128,76 @@ def _build_rules() -> list[DeinflectRule]:
         ("でみる", "で", "〜でみる（嘗試）"),
         ("てくる", "て", "〜てくる"),
         ("でくる", "で", "〜でくる"),
+        ("て来る", "て", "〜て来る"),
+        ("で来る", "で", "〜で来る"),
         ("ていく", "て", "〜ていく"),
         ("でいく", "で", "〜でいく"),
+        ("て行く", "て", "〜て行く"),
+        ("で行く", "で", "〜で行く"),
     ]:
-        aux_rule = RULE_V5 if aux.endswith(("う", "く")) else (RULE_VK if aux.endswith("くる") else RULE_V1)
+        aux_rule = (
+            RULE_V5
+            if aux.endswith(("う", "く", "行く"))
+            else (RULE_VK if aux.endswith(("くる", "来る")) else RULE_V1)
+        )
         add(aux, te_form, aux_rule, RULE_IRU, reason)
 
-    # 口語約音 〜ちゃう / 〜じゃう / 〜とく
+    # 口語約音・命令・禁止・必須
     add("ちゃう", "て", RULE_V5, RULE_IRU, "〜ちゃう（〜てしまう）")
     add("じゃう", "で", RULE_V5, RULE_IRU, "〜じゃう（〜でしまう）")
     add("とく", "て", RULE_V5, RULE_IRU, "〜とく（〜ておく）")
     add("どく", "で", RULE_V5, RULE_IRU, "〜どく（〜でおく）")
+    add("てろ", "て", RULE_NONE, RULE_IRU, "命令（〜ていろ）")
+    add("でろ", "で", RULE_NONE, RULE_IRU, "命令（〜でいろ）")
+    add("てんだ", "てる", RULE_NONE, RULE_V1, "口語解釋（〜ているのだ）")
+    add("でんだ", "でる", RULE_NONE, RULE_V1, "口語解釋（〜でいるのだ）")
+    add("てたんだ", "てた", RULE_NONE, RULE_IRU, "過去口語解釋（〜ていたのだ）")
+    add("でたんだ", "でた", RULE_NONE, RULE_IRU, "過去口語解釋（〜でいたのだ）")
+    add("てるんだ", "てる", RULE_NONE, RULE_V1, "口語解釋（〜ているのだ）")
+    add("でるんだ", "でる", RULE_NONE, RULE_V1, "口語解釋（〜でいるのだ）")
+    add("ちゃだめ", "て", RULE_NONE, RULE_IRU, "禁止（〜てはだめ）")
+    add("じゃだめ", "で", RULE_NONE, RULE_IRU, "禁止（〜ではだめ）")
+    add("なきゃ", "ない", RULE_NONE, RULE_ADJ_I, "必須（〜なければ）")
+    add("なくちゃ", "ない", RULE_NONE, RULE_ADJ_I, "必須（〜なくては）")
+    add("ないで", "ない", RULE_NONE, RULE_ADJ_I, "否定て形（〜ないで）")
 
     # --- 4. 過去形・て形・たら・たり ---
     # 優先匹配不規則サ變・カ變（避免「したら」誤拆成一段「しる」！）
-    add("した", "する", RULE_NONE | RULE_IRU, RULE_VS, "過去形")
-    add("して", "する", RULE_NONE | RULE_IRU, RULE_VS, "て形")
-    add("したら", "する", RULE_NONE | RULE_IRU, RULE_VS, "假定（〜たら）")
-    add("したり", "する", RULE_NONE | RULE_IRU, RULE_VS, "列舉（〜たり）")
-    add("きた", "くる", RULE_NONE | RULE_IRU, RULE_VK, "過去形")
-    add("きて", "くる", RULE_NONE | RULE_IRU, RULE_VK, "て形")
-    add("きたら", "くる", RULE_NONE | RULE_IRU, RULE_VK, "假定（〜たら）")
-    add("来た", "来る", RULE_NONE | RULE_IRU, RULE_VK, "過去形")
-    add("来て", "来る", RULE_NONE | RULE_IRU, RULE_VK, "て形")
-    add("来たら", "来る", RULE_NONE | RULE_IRU, RULE_VK, "假定（〜たら）")
+    add("した", "する", RULE_IRU, RULE_VS, "過去形")
+    add("して", "する", RULE_IRU, RULE_VS, "て形")
+    add("したら", "する", RULE_IRU, RULE_VS, "假定（〜たら）")
+    add("したり", "する", RULE_IRU, RULE_VS, "列舉（〜たり）")
+    add("きた", "くる", RULE_IRU, RULE_VK, "過去形")
+    add("きて", "くる", RULE_IRU, RULE_VK, "て形")
+    add("きたら", "くる", RULE_IRU, RULE_VK, "假定（〜たら）")
+    add("きたり", "くる", RULE_IRU, RULE_VK, "列舉（〜たり）")
+    add("来た", "来る", RULE_IRU, RULE_VK, "過去形")
+    add("来て", "来る", RULE_IRU, RULE_VK, "て形")
+    add("来たら", "来る", RULE_IRU, RULE_VK, "假定（〜たら）")
+    add("来たり", "来る", RULE_IRU, RULE_VK, "列舉（〜たり）")
 
     # 一段動詞
     for s_in, reason in [
         ("た", "過去形"), ("て", "て形"), ("たら", "假定（〜たら）"), ("たり", "列舉（〜たり）"),
     ]:
-        add(s_in, "る", RULE_NONE | RULE_IRU, RULE_V1, reason)
+        add(s_in, "る", RULE_IRU, RULE_V1, reason)
 
     # 五段音便
     godan_ta_te = [
-        ("った", "う", "過去形"), ("って", "う", "て形"), ("ったら", "う", "假定"),
-        ("った", "つ", "過去形"), ("って", "つ", "て形"), ("ったら", "つ", "假定"),
-        ("った", "る", "過去形"), ("って", "る", "て形"), ("ったら", "る", "假定"),
-        ("いた", "く", "過去形"), ("いて", "く", "て形"), ("いたら", "く", "假定"),
-        ("いだ", "ぐ", "過去形"), ("いで", "ぐ", "て形"), ("いだら", "ぐ", "假定"),
-        ("した", "す", "過去形"), ("して", "す", "て形"), ("したら", "す", "假定"),
-        ("んだ", "ぬ", "過去形"), ("んで", "ぬ", "て形"), ("んだら", "ぬ", "假定"),
-        ("んだ", "ぶ", "過去形"), ("んで", "ぶ", "て形"), ("んだら", "ぶ", "假定"),
-        ("んだ", "む", "過去形"), ("んで", "む", "て形"), ("んだら", "む", "假定"),
-        ("行った", "行く", "過去形"), ("行って", "行く", "て形"),
+        ("った", "う", "過去形"), ("って", "う", "て形"), ("ったら", "う", "假定"), ("ったり", "う", "列舉（〜たり）"),
+        ("った", "つ", "過去形"), ("って", "つ", "て形"), ("ったら", "つ", "假定"), ("ったり", "つ", "列舉（〜たり）"),
+        ("った", "る", "過去形"), ("って", "る", "て形"), ("ったら", "る", "假定"), ("ったり", "る", "列舉（〜たり）"),
+        ("いた", "く", "過去形"), ("いて", "く", "て形"), ("いたら", "く", "假定"), ("いたり", "く", "列舉（〜たり）"),
+        ("いだ", "ぐ", "過去形"), ("いで", "ぐ", "て形"), ("いだら", "ぐ", "假定"), ("いだり", "ぐ", "列舉（〜たり）"),
+        ("した", "す", "過去形"), ("して", "す", "て形"), ("したら", "す", "假定"), ("したり", "す", "列舉（〜たり）"),
+        ("んだ", "ぬ", "過去形"), ("んで", "ぬ", "て形"), ("んだら", "ぬ", "假定"), ("んだり", "ぬ", "列舉（〜たり）"),
+        ("んだ", "ぶ", "過去形"), ("んで", "ぶ", "て形"), ("んだら", "ぶ", "假定"), ("んだり", "ぶ", "列舉（〜たり）"),
+        ("んだ", "む", "過去形"), ("んで", "む", "て形"), ("んだら", "む", "假定"), ("んだり", "む", "列舉（〜たり）"),
+        ("行った", "行く", "過去形"), ("行って", "行く", "て形"), ("行ったら", "行く", "假定"), ("行ったり", "行く", "列舉（〜たり）"),
+        ("いった", "いく", "過去形"), ("いって", "いく", "て形"), ("いったら", "いく", "假定"), ("いったり", "いく", "列舉（〜たり）"),
     ]
     for s_in, s_out, reason in godan_ta_te:
-        add(s_in, s_out, RULE_NONE | RULE_IRU, RULE_V5, reason)
+        add(s_in, s_out, RULE_IRU, RULE_V5, reason)
 
     # --- 5. 否定形 (〜ない 按い形容詞變化) ---
     add("しない", "する", RULE_ADJ_I, RULE_VS, "否定形")
@@ -206,6 +240,9 @@ def _build_rules() -> list[DeinflectRule]:
     add("される", "する", RULE_V1, RULE_VS, "被動形")
     add("させる", "する", RULE_V1, RULE_VS, "使役形")
     add("こられる", "くる", RULE_V1, RULE_VK, "可能/被動形")
+    add("来られる", "来る", RULE_V1, RULE_VK, "可能/被動形")
+    add("こさせる", "くる", RULE_V1, RULE_VK, "使役形")
+    add("来させる", "来る", RULE_V1, RULE_VK, "使役形")
 
     # --- 7. 假定形 (〜ば) 與 意志形 (〜よう / お段+う) ---
     add("れば", "る", RULE_NONE, RULE_V1, "假定形（〜ば）")
@@ -219,6 +256,10 @@ def _build_rules() -> list[DeinflectRule]:
         add(f"{o_stem}う", dict_end, RULE_NONE, RULE_V5, "意志形")
     add("すれば", "する", RULE_NONE, RULE_VS, "假定形（〜ば）")
     add("しよう", "する", RULE_NONE, RULE_VS, "意志形")
+    add("くれば", "くる", RULE_NONE, RULE_VK, "假定形（〜ば）")
+    add("来れば", "来る", RULE_NONE, RULE_VK, "假定形（〜ば）")
+    add("こよう", "くる", RULE_NONE, RULE_VK, "意志形")
+    add("来よう", "来る", RULE_NONE, RULE_VK, "意志形")
 
     # --- 8. い形容詞活用 ---
     adj_rules = [
@@ -294,8 +335,8 @@ def deinflect(source: str, max_depth: int = 5) -> list[DeinflectCandidate]:
                 if not current.term.endswith(rule.kana_in):
                     continue
                 stem = current.term[: -len(rule.kana_in)]
-                # 獨立不規則動詞（する / くる / 来る / 行く）本身沒有詞幹前綴，允許 stem 為空！
-                if not stem and rule.kana_out not in ("する", "くる", "来る", "行く"):
+                # 獨立不規則動詞（する / くる / 来る / 行く / いく）本身沒有詞幹前綴，允許 stem 為空！
+                if not stem and rule.kana_out not in ("する", "くる", "来る", "行く", "いく"):
                     continue
                 next_term = stem + rule.kana_out
             else:

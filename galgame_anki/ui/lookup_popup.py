@@ -12,6 +12,7 @@ from typing import Callable
 
 from PySide6.QtCore import QPoint, QRect, QRectF, QSize, Qt, Signal
 from PySide6.QtWidgets import (
+    QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -50,7 +51,7 @@ from galgame_anki.core.word_associations import RelatedWordNode, WordAssociation
 from galgame_anki.ui.pitch_widget import PitchGraphWidget
 from galgame_anki.ui.sentence_widget import FlowLayout
 from galgame_anki.ui.web_dictionary import show_web_dictionary
-from galgame_anki.ui.theme import ThemePalette, get_palette
+from galgame_anki.ui.theme import ThemePalette, get_palette, soften_rich_html
 
 
 def _frequency_hint(freq: int | None) -> str:
@@ -68,7 +69,7 @@ def _format_particle_card_html(particle: ParticleInfo, theme_name: str) -> str:
     return (
         f'<div style="margin-bottom:8px; padding:8px 11px; background:{p.pill_ok_bg}; '
         f'border-left:3px solid {p.accent_pink}; border-radius:8px; color:{p.text_primary};">'
-        f'<div style="font-size:12px; font-weight:700; color:{p.accent_pink}; margin-bottom:2px;">'
+        f'<div style="font-size:12px; font-weight:500; color:{p.accent_pink}; margin-bottom:2px;">'
         f"助詞 [{html.escape(particle.level)}] · {html.escape(particle.role)}</div>"
         f'<div style="font-size:12px; color:{p.text_muted}; margin-bottom:3px;">接續：{html.escape(particle.formula)}</div>'
         f'<div style="font-size:14px; line-height:1.55;">{html.escape(particle.meaning)}</div>'
@@ -101,7 +102,7 @@ def _format_entries_html(
         blocks.append(
             f'<div style="margin-bottom:6px; padding:5px 10px; background:{p.pill_info_bg}; '
             f'border:1px solid {p.accent_lilac}; border-radius:7px; color:{p.pill_info_fg}; font-size:12.5px;">'
-            f"<b>EN</b> · {origin_str}</div>"
+            f'<span style="font-weight:500;">EN</span> · {origin_str}</div>'
         )
 
     focused = extract_concise_senses(entries, max_senses=5)
@@ -124,7 +125,7 @@ def _format_entries_html(
 
     if primary:
         eyebrow = (
-            f'<div style="font-size:11px; font-weight:700; color:{p.accent_pink}; margin-bottom:2px;">本句義</div>'
+            f'<div style="font-size:11px; font-weight:500; color:{p.accent_pink}; margin-bottom:2px;">本句義</div>'
             if is_contextual_override
             else ""
         )
@@ -132,7 +133,7 @@ def _format_entries_html(
             f'<div style="margin-bottom:8px; padding:9px 12px; background:{p.pill_ok_bg}; '
             f'border-left:3px solid {p.accent_pink}; border-radius:8px; color:{p.text_primary};">'
             f"{eyebrow}"
-            f'<div style="font-size:15px; font-weight:600; line-height:1.55;">{html.escape(primary)}</div>'
+            f'<div style="font-size:15px; font-weight:500; line-height:1.55;">{html.escape(primary)}</div>'
             f"</div>"
         )
 
@@ -140,7 +141,7 @@ def _format_entries_html(
         start_idx = 2 if primary else 1
         bullet_items = "".join(
             f'<div style="margin:2px 0; line-height:1.55;">'
-            f'<span style="color:{p.text_muted}; font-weight:600;">{idx}.</span> {html.escape(s)}</div>'
+            f'<span style="color:{p.text_muted}; font-weight:500;">{idx}.</span> {html.escape(s)}</div>'
             for idx, s in enumerate(other_senses, start=start_idx)
         )
         blocks.append(
@@ -261,7 +262,7 @@ class _TileScrollView(QScrollArea):
         hl.setSpacing(6)
         lbl = QLabel(title)
         lbl.setStyleSheet(
-            f"font-size: 11.5px; font-weight: 700; color: {p.accent_pink}; background: transparent;"
+            f"font-size: 11.5px; font-weight: 500; color: {p.accent_pink}; background: transparent;"
         )
         hl.addWidget(lbl)
         if subtitle:
@@ -316,7 +317,7 @@ def _make_origin_tile(origin: str, p: ThemePalette) -> QFrame:
 
     tag = QLabel(badge_txt)
     tag.setStyleSheet(
-        f"font-size: 10.5px; font-weight: 700; color: {p.accent_lilac}; "
+        f"font-size: 10.5px; font-weight: 500; color: {p.accent_lilac}; "
         f"background: transparent; border: none;"
     )
     hl.addWidget(tag)
@@ -324,7 +325,7 @@ def _make_origin_tile(origin: str, p: ThemePalette) -> QFrame:
     val = QLabel(origin)
     val.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
     val.setStyleSheet(
-        f"font-size: 13.5px; font-weight: 700; color: {p.text_primary}; "
+        f"font-size: 13.5px; font-weight: 500; color: {p.text_primary}; "
         f"background: transparent; border: none;"
     )
     hl.addWidget(val)
@@ -345,7 +346,7 @@ def _make_primary_sense_tile(text: str, p: ThemePalette, eyebrow: str = "") -> Q
     if eyebrow:
         eb = QLabel(eyebrow)
         eb.setStyleSheet(
-            f"font-size: 10.5px; font-weight: 700; color: {p.accent_pink}; "
+            f"font-size: 10.5px; font-weight: 500; color: {p.accent_pink}; "
             f"background: transparent; border: none;"
         )
         vl.addWidget(eb)
@@ -354,7 +355,7 @@ def _make_primary_sense_tile(text: str, p: ThemePalette, eyebrow: str = "") -> Q
     lbl.setWordWrap(True)
     lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
     lbl.setStyleSheet(
-        f"font-size: 14.5px; font-weight: 600; color: {p.text_primary}; "
+        f"font-size: 14.5px; font-weight: 500; color: {p.text_primary}; "
         f"background: transparent; border: none;"
     )
     vl.addWidget(lbl)
@@ -393,7 +394,7 @@ def _make_particle_card(particle: ParticleInfo, p: ThemePalette) -> QFrame:
 
     head = QLabel(f"助詞 [{particle.level}] · {particle.role}")
     head.setStyleSheet(
-        f"font-size: 12px; font-weight: 700; color: {p.accent_pink}; background: transparent; border: none;"
+        f"font-size: 12px; font-weight: 500; color: {p.accent_pink}; background: transparent; border: none;"
     )
     vl.addWidget(head)
 
@@ -432,14 +433,14 @@ def _make_assoc_tile(node: RelatedWordNode, p: ThemePalette) -> QFrame:
     if node.is_known:
         chk = QLabel("✓")
         chk.setStyleSheet(
-            f"font-size: 11.5px; font-weight: 700; color: {p.accent_mint}; background: transparent; border: none;"
+            f"font-size: 11.5px; font-weight: 500; color: {p.accent_mint}; background: transparent; border: none;"
         )
         top.addWidget(chk)
 
     term_lbl = QLabel(node.term)
     term_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
     term_lbl.setStyleSheet(
-        f"font-size: 13.5px; font-weight: 700; color: {p.text_primary}; background: transparent; border: none;"
+        f"font-size: 13.5px; font-weight: 500; color: {p.text_primary}; background: transparent; border: none;"
     )
     top.addWidget(term_lbl)
 
@@ -453,14 +454,14 @@ def _make_assoc_tile(node: RelatedWordNode, p: ThemePalette) -> QFrame:
     if node.relation == "homophone" and node.pitch:
         pt_lbl = QLabel(f"[{node.pitch}]")
         pt_lbl.setStyleSheet(
-            f"font-size: 11px; font-weight: 700; color: {p.accent_lilac}; background: transparent; border: none;"
+            f"font-size: 11px; font-weight: 500; color: {p.accent_lilac}; background: transparent; border: none;"
         )
         top.addWidget(pt_lbl)
 
     if node.tag:
         tg_lbl = QLabel(node.tag)
         tg_lbl.setStyleSheet(
-            f"font-size: 10.5px; font-weight: 600; color: {p.accent_lilac}; background: transparent; border: none;"
+            f"font-size: 10.5px; font-weight: 500; color: {p.accent_lilac}; background: transparent; border: none;"
         )
         top.addWidget(tg_lbl)
 
@@ -510,14 +511,14 @@ def _make_chunk_tile(chunk: ClauseChunk, p: ThemePalette) -> QFrame:
 
     role_lbl = QLabel(chunk.role_label)
     role_lbl.setStyleSheet(
-        f"font-size: 10px; font-weight: 700; color: {accent}; background: transparent; border: none;"
+        f"font-size: 10px; font-weight: 500; color: {accent}; background: transparent; border: none;"
     )
     vl.addWidget(role_lbl)
 
     txt_lbl = QLabel(chunk.text)
     txt_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
     txt_lbl.setStyleSheet(
-        f"font-size: 13.5px; font-weight: 700; color: {p.text_primary}; background: transparent; border: none;"
+        f"font-size: 13.5px; font-weight: 500; color: {p.text_primary}; background: transparent; border: none;"
     )
     vl.addWidget(txt_lbl)
 
@@ -541,9 +542,9 @@ def _make_relation_card(rel: SyntaxRelation, p: ThemePalette) -> QFrame:
     vl.setContentsMargins(10, 6, 10, 6)
     vl.setSpacing(2)
 
-    arrow_html = (
+    arrow_html = soften_rich_html(
         f"<b>{html.escape(rel.source)}</b> "
-        f'<span style="color:{p.accent_pink}; font-weight:700;">── {html.escape(rel.relation)} ──▶</span> '
+        f'<span style="color:{p.accent_pink}; font-weight:500;">── {html.escape(rel.relation)} ──▶</span> '
         f"<b>{html.escape(rel.target)}</b>"
     )
     lbl = QLabel(arrow_html)
@@ -582,7 +583,7 @@ def _make_pattern_card(
 
     title = QLabel(f"[{hit.level}] {hit.name}")
     title.setStyleSheet(
-        f"font-size: 13px; font-weight: 700; color: {p.text_primary}; background: transparent; border: none;"
+        f"font-size: 13px; font-weight: 500; color: {p.text_primary}; background: transparent; border: none;"
     )
     top.addWidget(title)
 
@@ -620,8 +621,10 @@ def _lesson_label(lesson: VerbLesson, link_color: str, preview: bool = False) ->
     heading = "試換一個詞尾" if preview else FORMS[lesson.form][0]
     if lesson.expanded:
         heading = FORMS[lesson.form][2]
-    return (f"<b>{heading}</b>" + lesson.diagram("示範接法" if preview else "台詞裡") + html.escape(lesson.rule) +
-            f'　<a href="compare" style="color:{link_color}">比較其他變法</a>')
+    return soften_rich_html(
+        f"<b>{heading}</b>" + lesson.diagram("示範接法" if preview else "台詞裡") + html.escape(lesson.rule) +
+        f'　<a href="compare" style="color:{link_color}">比較其他變法</a>'
+    )
 
 
 class StudyLink(QLabel):
@@ -629,7 +632,11 @@ class StudyLink(QLabel):
 
     def __init__(self):
         super().__init__()
+        self.focus = None
+        self.sentence = ""
+        self.lemma = ""
         self.setWordWrap(True)
+        self.setStyleSheet("background: transparent;")
         self.hide()
         self.linkActivated.connect(self._open)
 
@@ -644,7 +651,8 @@ class StudyLink(QLabel):
         self.show()
 
     def _open(self, _url):
-        self.requested.emit(self.focus, self.sentence, self.lemma)
+        if self.focus is not None:
+            self.requested.emit(self.focus, self.sentence, self.lemma)
 
 
 class LookupDetailPanel(QFrame):
@@ -680,7 +688,7 @@ class LookupDetailPanel(QFrame):
         top.setSpacing(8)
 
         self.word_label = QLabel("點擊上方台詞中的單詞或助詞")
-        self.word_label.setStyleSheet("font-size: 20px; font-weight: 700; background: transparent;")
+        self.word_label.setStyleSheet("font-size: 20px; font-weight: 500; background: transparent;")
         top.addWidget(self.word_label)
 
         self.reading_label = QLabel("")
@@ -819,10 +827,10 @@ class LookupDetailPanel(QFrame):
     def _apply_palette_styles(self) -> None:
         p = get_palette(self._theme_name)
         self.word_label.setStyleSheet(
-            f"font-size: 20px; font-weight: 700; color: {p.accent_pink}; background: transparent;"
+            f"font-size: 20px; font-weight: 500; color: {p.accent_pink}; background: transparent;"
         )
         self.reading_label.setStyleSheet(
-            f"font-size: 14px; color: {p.accent_lilac}; font-weight: 600; background: transparent;"
+            f"font-size: 14px; color: {p.accent_lilac}; font-weight: 500; background: transparent;"
         )
         self.pitch_widget.set_dark_mode(self._theme_name == "starlight")
 
@@ -1041,14 +1049,16 @@ class LookupDetailPanel(QFrame):
 
             head = QLabel("句子主幹")
             head.setStyleSheet(
-                f"font-size: 11px; font-weight: 700; color: {p.accent_pink}; background: transparent; border: none;"
+                f"font-size: 11px; font-weight: 500; color: {p.accent_pink}; background: transparent; border: none;"
             )
             sv.addWidget(head)
 
             topic_s = html.escape(analysis.skeleton_topic or "（省略主語）")
             pred_s = html.escape(analysis.skeleton_predicate)
             main_lbl = QLabel(
-                f'<b>{topic_s}</b> <span style="color:{p.accent_pink}; font-weight:700;">──▶</span> <b>{pred_s}</b>'
+                soften_rich_html(
+                    f'<b>{topic_s}</b> <span style="color:{p.accent_pink}; font-weight:500;">──▶</span> <b>{pred_s}</b>'
+                )
             )
             main_lbl.setWordWrap(True)
             main_lbl.setTextFormat(Qt.TextFormat.RichText)
@@ -1175,6 +1185,32 @@ class LookupDetailPanel(QFrame):
                     )
                     cv.addWidget(tr_lbl)
                 self.assoc_view.add_block(card, f"{spk}{gr.text} {gr.translation}".strip())
+
+    def clear_token(self) -> None:
+        """清空目前選取單詞狀態，避免新台詞無自動選詞時誤收錄上一句的殘留詞彙。"""
+        self._current_token = None
+        self._single_token = None
+        self._phrase_token = None
+        self._showing_phrase = False
+        self._last_args = None
+        self._sentence_tokens = ()
+        self.word_label.setText("點擊上方台詞中的單詞或助詞")
+        self.reading_label.setText("")
+        self.meta_label.setText("")
+        self.trace_label.setText("")
+        self.trace_label.hide()
+        self.study_link.focus = None
+        self.study_link.hide()
+        self.pitch_button.setChecked(False)
+        self.pitch_button.hide()
+        self.pitch_widget.hide()
+        self._clear_alt_bar()
+        self.mine_btn.setText("一鍵收錄")
+        self.mine_btn.setEnabled(False)
+        self.more_btn.setEnabled(False)
+        self.bi_view.clear()
+        self.mono_view.clear()
+        self.en_view.clear()
 
     def show_token(
         self,
@@ -1379,12 +1415,14 @@ def _kwin_blur_function():
 
 
 class OverlayLookupPopup(QFrame):
-    """附屬在透明覆蓋層上方的 Yomitan 風格懸停浮動查詞卡（支援外來語英文顯示，置頂於全螢幕 mpv 之上）。"""
+    """附屬在透明覆蓋層上方的極簡懸停查詞卡（1 行活用摘要＋4 顆不搶焦點按鈕，置頂於全螢幕 mpv 之上）。"""
 
     lesson_requested = Signal(object)
     mine_requested = Signal(object)
     copy_prompt_requested = Signal(object)
     audio_preview_requested = Signal()
+    workbench_requested = Signal(object, str, str, object, object)  # (StudyFocus, sentence, lemma, token, tokens)
+    queue_study_requested = Signal(str, str, str)                   # (sentence, surface, lemma)
     hover_entered = Signal()
     hover_left = Signal()
 
@@ -1405,6 +1443,12 @@ class OverlayLookupPopup(QFrame):
         self._phrase_token: Token | None = None
         self._showing_phrase: bool = False
         self._last_popup_args: tuple | None = None
+        self._sentence_tokens = ()
+        self._study_focus = None
+        self._current_sentence = ""
+        self._current_lemma = ""
+        self._max_lookup_size: QSize | None = None
+        self._lesson: VerbLesson | None = None
         self._build_ui()
         self.set_theme_name(theme_name)
 
@@ -1420,11 +1464,6 @@ class OverlayLookupPopup(QFrame):
         self.reading_label = QLabel("")
         top.addWidget(self.reading_label)
         top.addStretch()
-
-        self.web_btn = QPushButton("線上辭典")
-        self.web_btn.setToolTip("在 GalAnki 內查目前詞語的中文或英文解釋")
-        self.web_btn.clicked.connect(self._open_online_dictionary)
-        top.addWidget(self.web_btn)
         layout.addLayout(top)
 
         self.pitch_widget = PitchGraphWidget(
@@ -1433,19 +1472,11 @@ class OverlayLookupPopup(QFrame):
         )
         layout.addWidget(self.pitch_widget)
 
-        self.form_label = QLabel()
-        self.form_label.setWordWrap(True)
-        self.form_label.setTextFormat(Qt.TextFormat.RichText)
-        self.form_label.linkActivated.connect(self._open_form)
-        self.form_label.hide()
-        self._lesson = None
-        layout.addWidget(self.form_label)
-
-        self.study_link = StudyLink()
-        layout.addWidget(self.study_link)
-        self.reason_label = QLabel("")
-        self.reason_label.setWordWrap(True)
-        layout.addWidget(self.reason_label)
+        # 精簡單行活用／詞性摘要（不放多餘跳轉連結，保持沉浸）
+        self.conj_label = QLabel("")
+        self.conj_label.setWordWrap(True)
+        self.conj_label.hide()
+        layout.addWidget(self.conj_label)
 
         # 片假名外來語英文／原語小膠囊
         self.origin_label = QLabel("")
@@ -1465,7 +1496,7 @@ class OverlayLookupPopup(QFrame):
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setMaximumHeight(145)
+        scroll.setMaximumHeight(150)
         self._definition_scroll = scroll
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
@@ -1481,41 +1512,46 @@ class OverlayLookupPopup(QFrame):
 
         self.mine_btn = QPushButton("一鍵收錄")
         self.mine_btn.setObjectName("MineBtn")
+        self.mine_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.mine_btn.setToolTip(
-            "左鍵直接寫入 Anki（原聲＋截圖，右下角可撤銷）；按住 Shift 點擊可先編輯"
+            "左鍵直接寫入 Anki（原聲＋截圖，右下角可撤銷）；Shift+點擊可先編輯"
         )
         self.mine_btn.clicked.connect(self._on_mine)
         btn_row.addWidget(self.mine_btn, 1)
 
         self.audio_btn = QPushButton("試聽")
-        self.audio_btn.setFixedWidth(48)
+        self.audio_btn.setFixedWidth(50)
+        self.audio_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.audio_btn.setToolTip("試聽本句聲優原聲")
         self.audio_btn.clicked.connect(self.audio_preview_requested.emit)
         btn_row.addWidget(self.audio_btn)
 
+        self.workbench_btn = QPushButton("拆解")
+        self.workbench_btn.setFixedWidth(50)
+        self.workbench_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.workbench_btn.setToolTip(
+            "左鍵開啟邏輯拆解工作台；Shift+點擊加入「待拆解」隊列，稍後復盤不中斷遊玩"
+        )
+        self.workbench_btn.clicked.connect(self._on_workbench)
+        btn_row.addWidget(self.workbench_btn)
+
         self.prompt_btn = QPushButton("提問")
-        self.prompt_btn.setFixedWidth(48)
+        self.prompt_btn.setFixedWidth(50)
+        self.prompt_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.prompt_btn.setToolTip("複製提問詞給 Gemini / ChatGPT")
         self.prompt_btn.clicked.connect(self._on_copy_prompt)
         btn_row.addWidget(self.prompt_btn)
 
         layout.addLayout(btn_row)
 
-    def _open_online_dictionary(self) -> None:
-        if self._token is None:
-            return
-        token = self._token
-        query = (token.lookup.lemma if token.lookup else token.lemma) or token.surface
-        parent = self.parentWidget()
-        self.hide()
-        show_web_dictionary(query, parent, "kotobank")
-
     def reset_lookup_area(self) -> None:
+        self._max_lookup_size = None
         self.setFixedWidth(385)
         self.setMaximumHeight(16777215)
-        self._definition_scroll.setMaximumHeight(145)
+        self._definition_scroll.setMaximumHeight(150)
 
     def fit_to_lookup_area(self, size: QSize) -> None:
+        self._max_lookup_size = QSize(size)
         self.setFixedWidth(size.width())
         self.layout().activate()
         if self.height() > size.height():
@@ -1572,32 +1608,48 @@ class OverlayLookupPopup(QFrame):
         p = get_palette(theme_name)
         self.update()
         self.title_label.setStyleSheet(
-            f"font-size: 18px; font-weight: 700; color: {p.accent_pink}; background: transparent;"
+            f"font-size: 18px; font-weight: 500; color: {p.accent_pink}; background: transparent;"
         )
         self.reading_label.setStyleSheet(
             f"font-size: 13px; color: {p.accent_lilac}; background: transparent;"
         )
-        self.form_label.setStyleSheet(f"background: transparent; color: {p.text_primary};")
-        self.reason_label.setStyleSheet(
-            f"font-size: 11px; color: {p.text_muted}; background: transparent;"
+        self.conj_label.setStyleSheet(
+            f"font-size: 11.5px; color: {p.text_secondary}; background: transparent;"
         )
         self.origin_label.setStyleSheet(
-            f"font-size: 12px; font-weight: 700; color: {p.pill_info_fg}; "
+            f"font-size: 12px; font-weight: 500; color: {p.pill_info_fg}; "
             f"background: {p.pill_info_bg}; border: 1px solid {p.accent_lilac}; "
             f"border-radius: 6px; padding: 3px 8px;"
         )
         self.def_label.setStyleSheet(
-            f"font-size: 13.5px; line-height: 1.55; color: {p.text_primary}; background: transparent; padding: 2px;"
+            f"font-size: 13.5px; color: {p.text_primary}; background: transparent; padding: 2px;"
         )
         self.pitch_widget.set_dark_mode(self._theme_name == "starlight")
-
-    def _open_form(self, _url: str) -> None:
-        if self._lesson is not None:
-            self.lesson_requested.emit(self._lesson)
 
     def _on_mine(self) -> None:
         if self._token is not None:
             self.mine_requested.emit(self._token)
+            self.hide()
+
+    def _on_workbench(self) -> None:
+        if self._token is None:
+            return
+        if QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier:
+            self.queue_study_requested.emit(
+                self._current_sentence,
+                self._token.surface,
+                self._current_lemma,
+            )
+            self.hide()
+            return
+        if self._study_focus is not None:
+            self.workbench_requested.emit(
+                self._study_focus,
+                self._current_sentence,
+                self._current_lemma,
+                self._token,
+                self._sentence_tokens,
+            )
             self.hide()
 
     def _on_copy_prompt(self) -> None:
@@ -1611,6 +1663,10 @@ class OverlayLookupPopup(QFrame):
                 item.widget().hide()
                 item.widget().deleteLater()
         self.alt_bar.hide()
+
+    def _reapply_size_bound(self) -> None:
+        if self._max_lookup_size is not None:
+            self.fit_to_lookup_area(self._max_lookup_size)
 
     def _swap_alt(self, alt: LookupMatch) -> None:
         if self._token is None or self._last_popup_args is None:
@@ -1645,6 +1701,7 @@ class OverlayLookupPopup(QFrame):
             translation,
             show=self.isVisible(),
         )
+        self._reapply_size_bound()
 
     def _toggle_phrase_mode(self, use_phrase: bool) -> None:
         if self._last_popup_args is None or self._single_token is None or self._phrase_token is None:
@@ -1661,6 +1718,7 @@ class OverlayLookupPopup(QFrame):
             translation,
             show=self.isVisible(),
         )
+        self._reapply_size_bound()
 
     def popup_for_token(
         self,
@@ -1675,7 +1733,7 @@ class OverlayLookupPopup(QFrame):
         phrase_token: Token | None = None,
         tokens=(),
     ) -> None:
-        self._sentence_tokens = tokens
+        self._sentence_tokens = tuple(tokens) if tokens else ()
         self._single_token = token
         self._phrase_token = phrase_token
         self._showing_phrase = phrase_token is not None
@@ -1702,12 +1760,21 @@ class OverlayLookupPopup(QFrame):
         *,
         show: bool = True,
     ) -> None:
+        p = get_palette(self._theme_name)
         self._token = token
-        self.study_link.bind(token, sentence, self._sentence_tokens, self._showing_phrase, particle_info, translation,
-                             get_palette(self._theme_name).pill_info_fg)
         match = token.lookup
         lemma = match.lemma if match else token.lemma
         reading = match.reading if match else token.reading
+        self._current_sentence = sentence
+        self._current_lemma = lemma
+        self._study_focus = focus_for(
+            token,
+            tokens=self._sentence_tokens,
+            phrase=self._showing_phrase,
+            particle=particle_info,
+            sentence=sentence,
+            translation=translation,
+        )
 
         self.title_label.setText(lemma)
         pitch_txt = f" [{'/'.join(match.pitches[:2])}]" if (match and match.pitches) else ""
@@ -1720,25 +1787,32 @@ class OverlayLookupPopup(QFrame):
             dark_mode=(self._theme_name == "starlight"),
         )
 
-        meta_lines: list[str] = []
+        # 1 行精簡活用／詞性摘要（無多餘跳轉連結）
+        self._lesson = lesson_for_token(token, preview=False) if not particle_info else None
+        conj_parts: list[str] = []
         if particle_info is not None:
-            meta_lines.append(f"助詞 [{particle_info.level}] {particle_info.role}（{particle_info.formula}）")
-        elif match and match.all_entries:
-            pos_friendly = explain_pos_friendly(match.all_entries[0].pos)
-            if pos_friendly:
-                meta_lines.append(pos_friendly)
-        if match and match.reasons and token.surface != lemma and not token.is_te_form:
-            meta_lines.append(f"{token.surface} → {lemma}（{' → '.join(match.reasons)}）")
-
-        self._lesson = lesson_for_token(token, preview=True) if not particle_info else None
-        if self._lesson:
-            self.form_label.setText(_lesson_label(self._lesson, get_palette(self._theme_name).pill_info_fg, token.surface == token.lemma))
-        self.form_label.setVisible(self._lesson is not None)
-        if meta_lines and not self._lesson:
-            self.reason_label.setText(" ｜ ".join(meta_lines))
-            self.reason_label.show()
+            conj_parts.append(f"助詞 [{particle_info.level}] {particle_info.role}（{particle_info.formula}）")
+        elif self._lesson is not None:
+            form_title = FORMS[self._lesson.form][2] if self._lesson.expanded else FORMS[self._lesson.form][0]
+            if self._lesson.expanded:
+                conj_parts.append(f"口語縮約：{self._lesson.expanded} → {self._lesson.surface}（{form_title}）")
+            else:
+                conj_parts.append(f"{form_title}：{self._lesson.lemma} → {self._lesson.surface}")
+            if self._lesson.rule:
+                conj_parts.append(self._lesson.rule)
         else:
-            self.reason_label.hide()
+            if match and match.all_entries:
+                pos_friendly = explain_pos_friendly(match.all_entries[0].pos)
+                if pos_friendly:
+                    conj_parts.append(pos_friendly)
+            if match and match.reasons and token.surface != lemma:
+                conj_parts.append(f"{token.surface} → {lemma}（{' → '.join(match.reasons)}）")
+
+        if conj_parts:
+            self.conj_label.setText(" · ".join(conj_parts))
+            self.conj_label.show()
+        else:
+            self.conj_label.hide()
 
         # 片假名外來語英文原詞標記
         origins = (
@@ -1757,10 +1831,12 @@ class OverlayLookupPopup(QFrame):
         if self._phrase_token is not None and self._single_token is not None:
             if self._showing_phrase:
                 sw = QPushButton(f"獨立詞：{self._single_token.surface}")
+                sw.setFocusPolicy(Qt.FocusPolicy.NoFocus)
                 sw.setStyleSheet("padding: 3px 8px;")
                 sw.clicked.connect(lambda _c=False: self._toggle_phrase_mode(False))
             else:
                 sw = QPushButton(f"語塊：{self._phrase_token.surface}")
+                sw.setFocusPolicy(Qt.FocusPolicy.NoFocus)
                 sw.setStyleSheet("padding: 3px 8px;")
                 sw.clicked.connect(lambda _c=False: self._toggle_phrase_mode(True))
             self.alt_layout.addWidget(sw)
@@ -1768,10 +1844,11 @@ class OverlayLookupPopup(QFrame):
 
         if match and match.alt_matches and particle_info is None:
             lbl = QLabel("其他：")
-            lbl.setStyleSheet("font-size: 11px; opacity: 0.7; background: transparent;")
+            lbl.setStyleSheet(f"font-size: 11px; color: {p.text_muted}; background: transparent;")
             self.alt_layout.addWidget(lbl)
             for alt in match.alt_matches[:3]:
                 b = QPushButton(alt.lemma)
+                b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
                 b.setStyleSheet("padding: 3px 8px;")
                 b.setToolTip(alt.lemma + "（" + alt.reading + "）")
                 b.clicked.connect(lambda _c=False, a=alt: self._swap_alt(a))
@@ -1820,7 +1897,7 @@ class OverlayLookupPopup(QFrame):
             parts.append("詞典暫無此詞條，可直接收錄原句或複製提問。")
 
         self.def_label.setText("\n".join(parts))
-        self.mine_btn.setText("追加例句（Shift 編輯）" if already_known else "一鍵收錄（Shift 編輯）")
+        self.mine_btn.setText("追加例句" if already_known else "一鍵收錄")
         self.adjustSize()
         if show:
             self.show()

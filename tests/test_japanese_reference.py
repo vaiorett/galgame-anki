@@ -56,7 +56,20 @@ class ReferenceTests(unittest.TestCase):
         self.assertEqual(self.index.find("７月二十四號"), [("dates", 23), ("months", 6)])
         self.assertEqual(self.index.date_parts("二月二十九日"), (2, 29))
         self.assertIsNone(self.index.date_parts("二月三十日"))
-        self.assertIn("core_spoken_dict", [k for k, _ in self.index.find("分かる")])
+        # 已移除 294 列生詞表雜訊，改由精準索引涵蓋繁簡、羅馬音、24 小時制與精確助詞
+        self.assertNotIn("core_spoken_dict", self.index.topics)
+        self.assertNotIn("starter_dict", self.index.topics)
+        self.assertIn("galanki-quickstart", self.index.topics)
+        self.assertEqual(self.index.find("五十音")[0][0], "kana")
+        self.assertEqual(self.index.find("shi")[0][0], "kana")
+        self.assertIn(self.index.find("kya")[0][0], ("voicing", "kana-combinations"))
+        self.assertEqual(self.index.find("rya")[0][0], "kana-combinations")
+        self.assertEqual(self.index.find("4ヵ月")[0][0], "monthspan")
+        self.assertEqual(self.index.find("13時")[0][0], "hours")
+        self.assertEqual(self.index.find("に")[0][0], "particle-に")
+        self.assertEqual(self.index.find("は")[0][0], "particle-は")
+        self.assertTrue(self.index.find("被动"))
+        self.assertTrue(self.index.find("动词"))
 
     def test_search_from_dialog_and_navigate_relations(self):
         with tempfile.TemporaryDirectory() as tmp:

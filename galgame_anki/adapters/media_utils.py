@@ -12,6 +12,26 @@ from pathlib import Path
 
 AUDIO_SAMPLE_RATE = 24000
 
+_PLAY_LOCK = threading.Lock()
+_ACTIVE_PLAYER: subprocess.Popen | None = None
+
+
+def stop_active_audio_preview() -> None:
+    """立即停止目前正在播放的試聽音訊進程，避免快速連點重疊爆音。"""
+    global _ACTIVE_PLAYER
+    with _PLAY_LOCK:
+        proc = _ACTIVE_PLAYER
+        _ACTIVE_PLAYER = None
+    if proc is not None and proc.poll() is None:
+        try:
+            proc.terminate()
+            proc.wait(timeout=0.5)
+        except (OSError, subprocess.SubprocessError):
+            try:
+                proc.kill()
+            except OSError:
+                pass
+
 
 def extract_video_audio_mp3(
     video_path: str,
@@ -26,19 +46,20 @@ def extract_video_audio_mp3(
         return None
     ss = max(0.0, start_sec - pad_sec)
     dur = max(0.4, min(18.0, (end_sec - start_sec) + pad_sec * 2))
-    res = subprocess.run(
-        [
+
+    def _run_extract(stream_idx: int | None) -> bytes | None:
+        cmd = [
             ffmpeg,
             "-hide_banner",
             "-loglevel",
             "error",
             "-ss",
             f"{ss:.3f}",
-            "-t",
-            f"{dur:.3f}",
             "-i",
             video_path,
-            *(["-map", f"0:{audio_stream_index}"] if audio_stream_index is not None else []),
+            "-t",
+            f"{dur:.3f}",
+            *(["-map", f"0:{stream_idx}"] if stream_idx is not None else []),
             "-vn",
             "-ac",
             "1",
@@ -51,15 +72,22 @@ def extract_video_audio_mp3(
             "-f",
             "mp3",
             "pipe:1",
-        ],
-        capture_output=True,
-        timeout=15,
-        check=False,
-    )
-    if res.returncode != 0 or not res.stdout:
+        ]
+        try:
+            res = subprocess.run(cmd, capture_output=True, timeout=15, check=False)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if res.returncode == 0 and res.stdout:
+            return res.stdout
+        return None
+
+    out = _run_extract(audio_stream_index)
+    if out is None and audio_stream_index is not None:
+        out = _run_extract(None)
+    if not out:
         return None
     fname = f"gal_mpv_{int(time.time() * 1000)}.mp3"
-    return res.stdout, fname
+    return out, fname
 
 
 def extract_video_frame_webp(
@@ -71,32 +99,35 @@ def extract_video_frame_webp(
     if not ffmpeg or not video_path or not Path(video_path).exists():
         return None
     ss = max(0.0, at_sec + 0.15)
-    res = subprocess.run(
-        [
-            ffmpeg,
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-ss",
-            f"{ss:.3f}",
-            "-i",
-            video_path,
-            "-vframes",
-            "1",
-            "-vf",
-            "scale='min(960,iw)':-2",
-            "-c:v",
-            "libwebp",
-            "-quality",
-            "78",
-            "-f",
-            "webp",
-            "pipe:1",
-        ],
-        capture_output=True,
-        timeout=10,
-        check=False,
-    )
+    try:
+        res = subprocess.run(
+            [
+                ffmpeg,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-ss",
+                f"{ss:.3f}",
+                "-i",
+                video_path,
+                "-vframes",
+                "1",
+                "-vf",
+                "scale='min(960,iw)':-2",
+                "-c:v",
+                "libwebp",
+                "-quality",
+                "78",
+                "-f",
+                "webp",
+                "pipe:1",
+            ],
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
     if res.returncode != 0 or not res.stdout:
         return None
     fname = f"gal_frame_{int(time.time() * 1000)}.webp"
@@ -104,35 +135,60 @@ def extract_video_frame_webp(
 
 
 def play_mp3_bytes_async(mp3_bytes: bytes, on_error: Callable[[str], None] | None = None) -> None:
-    """非同步試聽語音 MP3（使用 ffplay 或 paplay）。"""
+    """非同步試聽語音 MP3（自動取消前一次播放並限制逾時，使用 ffplay 或 paplay）。"""
     if not mp3_bytes:
         return
 
+    def _run_tracked(cmd: list[str]) -> bool:
+        global _ACTIVE_PLAYER
+        proc: subprocess.Popen | None = None
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            with _PLAY_LOCK:
+                _ACTIVE_PLAYER = proc
+            rc = proc.wait(timeout=25)
+            return rc == 0
+        except (OSError, subprocess.SubprocessError):
+            if proc is not None and proc.poll() is None:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=1.0)
+                except (OSError, subprocess.SubprocessError):
+                    pass
+            return False
+        finally:
+            with _PLAY_LOCK:
+                if _ACTIVE_PLAYER is proc:
+                    _ACTIVE_PLAYER = None
+
     def _play() -> None:
+        stop_active_audio_preview()
         with tempfile.TemporaryDirectory(prefix="galanki_play_") as tmpdir:
             path = Path(tmpdir) / "preview.mp3"
             path.write_bytes(mp3_bytes)
             ffplay = shutil.which("ffplay")
-            if ffplay:
-                played = subprocess.run(
-                    [ffplay, "-nodisp", "-autoexit", "-loglevel", "quiet", str(path)],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    check=False,
-                )
-                if played.returncode == 0:
-                    return
+            if ffplay and _run_tracked([ffplay, "-nodisp", "-autoexit", "-loglevel", "quiet", str(path)]):
+                return
             paplay = shutil.which("paplay")
             ffmpeg = shutil.which("ffmpeg")
             if paplay and ffmpeg:
                 wav_path = Path(tmpdir) / "preview.wav"
-                subprocess.run(
-                    [ffmpeg, "-hide_banner", "-loglevel", "error", "-i", str(path), str(wav_path)],
-                    check=False,
-                )
-                if wav_path.exists():
-                    if subprocess.run([paplay, str(wav_path)], check=False).returncode == 0:
-                        return
+                try:
+                    subprocess.run(
+                        [ffmpeg, "-hide_banner", "-loglevel", "error", "-i", str(path), str(wav_path)],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=10,
+                        check=False,
+                    )
+                except (OSError, subprocess.SubprocessError):
+                    wav_path = Path("")
+                if wav_path and wav_path.exists() and _run_tracked([paplay, str(wav_path)]):
+                    return
             if on_error:
                 on_error("試聽失敗：請確認系統音訊輸出及 ffplay 或 paplay 是否可用")
 

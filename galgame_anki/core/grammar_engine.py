@@ -89,8 +89,8 @@ class SentenceGrammarAnalysis:
             blocks.append(
                 f'<div style="margin-bottom:9px; padding:8px 11px; border-left:3px solid {accent_color}; '
                 f'background:rgba(127,127,127,0.08); border-radius:6px;">'
-                f'<div style="font-size:11px; font-weight:700; color:{accent_color}; margin-bottom:3px;">句子主幹</div>'
-                f'<div style="font-size:14px; font-weight:700;">{topic_txt} '
+                f'<div style="font-size:11px; font-weight:500; color:{accent_color}; margin-bottom:3px;">句子主幹</div>'
+                f'<div style="font-size:14px; font-weight:500;">{topic_txt} '
                 f'<span style="color:{accent_color};">──▶</span> {pred_txt}</div>'
                 f"{hint_html}</div>"
             )
@@ -100,7 +100,7 @@ class SentenceGrammarAnalysis:
                 blocks.append(lesson.html())
 
         if self.chunks:
-            blocks.append(f'<div style="font-weight:700; color:{accent_color}; margin-bottom:4px;">結構分塊</div>')
+            blocks.append(f'<div style="font-weight:500; color:{accent_color}; margin-bottom:4px;">結構分塊</div>')
             chunk_rows: list[str] = []
             for ch in self.chunks:
                 gl = f" — {html.escape(ch.gloss)}" if ch.gloss else ""
@@ -112,7 +112,7 @@ class SentenceGrammarAnalysis:
             blocks.append(f'<div style="margin-bottom:9px;">{"".join(chunk_rows)}</div>')
 
         if self.logic_relations:
-            blocks.append(f'<div style="font-weight:700; color:{accent_color}; margin-bottom:4px;">修飾與邏輯鏈</div>')
+            blocks.append(f'<div style="font-weight:500; color:{accent_color}; margin-bottom:4px;">修飾與邏輯鏈</div>')
             for rel in self.logic_relations:
                 note = f' <span style="font-size:11.5px; color:{muted_color};">（{html.escape(rel.explanation)}）</span>' if rel.explanation else ""
                 blocks.append(
@@ -123,7 +123,7 @@ class SentenceGrammarAnalysis:
                 )
 
         if self.grammar_hits:
-            blocks.append(f'<div style="font-weight:700; color:{accent_color}; margin:9px 0 6px 0;">命中句型</div>')
+            blocks.append(f'<div style="font-weight:500; color:{accent_color}; margin:9px 0 6px 0;">命中句型</div>')
             for hit in self.grammar_hits:
                 blocks.append(
                     f'<div style="margin-bottom:7px; padding:7px 10px; border-left:3px solid {accent_color}; '
@@ -136,7 +136,7 @@ class SentenceGrammarAnalysis:
                 )
 
         if self.conjugation_notes:
-            blocks.append(f'<div style="font-weight:700; color:{accent_color}; margin:8px 0 4px 0;">活用拆解</div>')
+            blocks.append(f'<div style="font-weight:500; color:{accent_color}; margin:8px 0 4px 0;">活用拆解</div>')
             for note in self.conjugation_notes:
                 blocks.append(f'<div style="font-size:13px; margin:2px 0;">• {html.escape(note)}</div>')
 
@@ -331,6 +331,8 @@ def _is_verb_or_adj(tok: Token, particles: dict[str, ParticleInfo]) -> bool:
         return False
     if tok.surface in particles and tok.surface not in ("ない", "なかった", "だ", "です"):
         return False
+    if tok.verb_type:
+        return True
     pos = _tok_pos(tok)
     if any(k in pos for k in ("v1", "v5", "vs", "vk", "godan", "ichidan", "verb", "adj-i", "adj-na", "adj", "動", "形")):
         if "adj-pn" not in pos:
@@ -977,26 +979,134 @@ class OfflineGrammarEngine:
         seen_ids: set[str] = set()
 
         token_lessons = [lesson_for_token(tok) for tok in tokenized.tokens]
-        # 「本を読んだ」的「んだ」屬於動詞過去式。「読んだんだ」才在後面加了解釋語氣。
-        past_endings = {tok.end - 2 for tok, lesson in zip(tokenized.tokens, token_lessons)
-                        if lesson and lesson.form == "ta" and tok.surface.endswith("んだ")}
+        # 「本を読んだ／飲んだ／遊んだ」的「んだ」屬於動詞過去式；「読んだんだ」才在後面加了解釋語氣。
+        past_endings: set[int] = set()
+        for tok, lesson in zip(tokenized.tokens, token_lessons):
+            if not tok.surface.endswith("んだ"):
+                continue
+            if lesson is not None and lesson.form in ("tenda", "tetanda", "terunda"):
+                continue
+            if tok.lookup and any("解釋" in r or "追問" in r or "のだ" in r for r in tok.lookup.reasons):
+                continue
+            is_ta_past = (
+                (lesson is not None and lesson.form == "ta")
+                or (
+                    tok.lemma.endswith(("む", "ぶ", "ぬ"))
+                    and tok.surface != tok.lemma
+                    and not tok.surface.endswith("んだんだ")
+                )
+            )
+            if is_ta_past:
+                past_endings.add(tok.end - 2)
+
+        def _token_at(pos: int) -> Token | None:
+            for tk in tokenized.tokens:
+                if tk.start <= pos < tk.end:
+                    return tk
+            return None
+
         for regex, pat in self._compiled:
-            if pat["id"] == "n5_noda" and past_endings:
-                m = next((hit for hit in regex.finditer(sentence) if hit.start() not in past_endings), None)
+            pid = pat["id"]
+            if pid in seen_ids:
+                continue
+            matched_text: str | None = None
+
+            if pid == "n4_potential":
+                # 必須由動詞活用分析或可能形詞尾確認，絕不把一般一段動詞（食べる／見せる／忘れる）誤判成可能形
+                for tok, lesson in zip(tokenized.tokens, token_lessons):
+                    if lesson is not None and lesson.form == "potential":
+                        matched_text = tok.surface
+                        break
+                    if tok.lookup and any("可能" in r for r in tok.lookup.reasons):
+                        matched_text = tok.surface
+                        break
+                    if (
+                        tok.surface.endswith(("られる", "られた", "られない", "られなかった", "られます"))
+                        and tok.surface != tok.lemma
+                        and (tok.verb_type or (tok.lookup and any(
+                            any(k in e.pos.lower() for k in ("v1", "v5", "vk", "一段", "五段"))
+                            for e in tok.lookup.all_entries
+                        )))
+                    ):
+                        matched_text = tok.surface
+                        break
+            elif pid == "n4_ba":
+                # 排除「言葉／やばい／すばらしい／たとえば」等普通詞彙，只匹配真實假定形 〜ば／〜ければ
+                if "ければ" in sentence:
+                    m_ba = regex.search(sentence)
+                    if m_ba:
+                        matched_text = m_ba.group(0)
+                if matched_text is None:
+                    for tok, lesson in zip(tokenized.tokens, token_lessons):
+                        if lesson is not None and lesson.form == "ba":
+                            matched_text = tok.surface
+                            break
+                        if tok.lookup and any("仮定" in r or "假定" in r or "〜ば" in r for r in tok.lookup.reasons):
+                            matched_text = tok.surface
+                            break
+                        if tok.surface == "ば" and tok.is_function_word:
+                            matched_text = "ば"
+                            break
+            elif pid == "n5_noda":
+                m = next(
+                    (hit for hit in regex.finditer(sentence) if hit.start() not in past_endings),
+                    None,
+                )
+                if m:
+                    matched_text = m.group(0)
+            elif pid == "n4_nara":
+                for hit in regex.finditer(sentence):
+                    tk = _token_at(hit.start())
+                    if tk is not None and tk.lemma in ("なる", "成る", "並ぶ", "必ず", "さよなら", "さようなら", "習う"):
+                        continue
+                    before_nara = sentence[: hit.start()]
+                    if before_nara.endswith(("ければ", "ては", "では", "なきゃ")):
+                        continue
+                    matched_text = hit.group(0)
+                    break
+            elif pid == "n4_temo":
+                for hit in regex.finditer(sentence):
+                    tk = _token_at(hit.start())
+                    if tk is not None and tk.surface in ("とても", "いつでも", "何でも", "なんでも", "誰でも", "だれでも", "どこでも"):
+                        continue
+                    if hit.group(0).startswith("でも"):
+                        before_t = sentence[: hit.start()].rstrip()
+                        if not before_t or before_t[-1] in "。、！？!?「『（(":
+                            continue
+                    matched_text = hit.group(0)
+                    break
+            elif pid == "n4_teoku":
+                m = regex.search(sentence)
+                if m:
+                    seg = m.group(0)
+                    if seg.startswith(("てお", "でお")):
+                        matched_text = seg
+                    else:
+                        # 縮約形「とく／どく／といて」須與動詞活用吻合，避免誤判「届く／解く／説く」
+                        for tok, lesson in zip(tokenized.tokens, token_lessons):
+                            if lesson is not None and lesson.form in ("toku", "toite", "toita"):
+                                matched_text = tok.surface
+                                break
+                            if tok.lookup and any("ておく" in r or "預先" in r for r in tok.lookup.reasons):
+                                matched_text = tok.surface
+                                break
             else:
                 m = regex.search(sentence)
-            if m and pat["id"] not in seen_ids:
-                seen_ids.add(pat["id"])
+                if m:
+                    matched_text = m.group(0)
+
+            if matched_text:
+                seen_ids.add(pid)
                 hits.append(
                     GrammarHit(
-                        pattern_id=pat["id"],
+                        pattern_id=pid,
                         level=pat["level"],
                         category=pat["category"],
                         name=pat["name"],
                         formula=pat["formula"],
                         meaning=pat["meaning"],
                         example=pat["example"],
-                        matched_text=m.group(0),
+                        matched_text=matched_text,
                     )
                 )
 

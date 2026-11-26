@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
 
 from galgame_anki.core.dictionary import FREE_DICTIONARY_CATALOG, DictionaryEngine
 from galgame_anki.core.sentence_store import load_difficulty_guide
-from galgame_anki.ui.theme import get_palette
+from galgame_anki.ui.theme import apply_soft_bold_document, get_palette, soften_rich_html
 from galgame_anki.ui.workers import DictBundleDownloadWorker, DictDownloadWorker, DictImportWorker
 
 
@@ -41,8 +41,8 @@ class DictionaryManagerDialog(QDialog):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("📚 詞典管理（獨立開關・優先序・相容 Yomitan .zip）")
-        self.resize(740, 680)
+        self.setWindowTitle("詞典管理（獨立開關・優先序・相容 Yomitan .zip）")
+        self.resize(720, 620)
         self.dictionary = dictionary
         self.thread_pool = thread_pool
         self._workers: list[object] = []
@@ -59,7 +59,7 @@ class DictionaryManagerDialog(QDialog):
         top = QHBoxLayout()
         title = QLabel("已安裝本地詞典（勾選即可單獨開啟／停用，不需全部開啟！）")
         title.setWordWrap(True)
-        title.setStyleSheet("font-weight: 700;")
+        title.setStyleSheet("font-weight: 500;")
         top.addWidget(title, 1)
 
         up_btn = QPushButton("⬆ 上移")
@@ -202,18 +202,22 @@ class DictionaryManagerDialog(QDialog):
             if installed is not None:
                 en_badge = "已啟用" if installed["enabled"] else "已停用（可在上方勾選開啟）"
                 lbl.setText(
-                    f"<b>{spec['name']}</b> "
-                    f"<span style='color:#059669; font-weight:700;'>✅ 已安裝（{installed['entry_count']:,} 筆 · {en_badge}）</span>"
-                    f"<br><span style='font-size:12px; opacity:0.78;'>{spec['description']}</span>"
+                    soften_rich_html(
+                        f"<b>{spec['name']}</b> "
+                        f"<span style='color:#059669; font-weight:500;'>✅ 已安裝（{installed['entry_count']:,} 筆 · {en_badge}）</span>"
+                        f"<br><span style='font-size:12px; opacity:0.78;'>{spec['description']}</span>"
+                    )
                 )
                 btn.setText("↻ 重裝")
             else:
                 if spec.get("recommended_bundle"):
                     bundle_all_installed = False
                 lbl.setText(
-                    f"<b>{spec['name']}</b> "
-                    f"<span style='opacity:0.65;'>⬜ 未安裝</span>"
-                    f"<br><span style='font-size:12px; opacity:0.78;'>{spec['description']}</span>"
+                    soften_rich_html(
+                        f"<b>{spec['name']}</b> "
+                        f"<span style='opacity:0.65;'>⬜ 未安裝</span>"
+                        f"<br><span style='font-size:12px; opacity:0.78;'>{spec['description']}</span>"
+                    )
                 )
                 btn.setText("⬇ 安裝")
 
@@ -357,6 +361,7 @@ class DifficultyGuideDialog(QDialog):
 
         p = get_palette(theme_name)
         browser = QTextBrowser()
+        apply_soft_bold_document(browser)
         browser.setOpenExternalLinks(True)
         guide = load_difficulty_guide()
 

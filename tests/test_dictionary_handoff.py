@@ -643,11 +643,11 @@ class TestDictionaryHandoff(unittest.TestCase):
             self.assertNotIn("%E5%85%88%E8%BC%A9", opened)
             open_url.assert_called_once_with("気を遣う", panel, "kotobank")
             open_url.reset_mock()
-            overlay.popup.web_btn.click()
-            open_url.assert_called_once_with("気を遣う", overlay, "kotobank")
-            overlay.popup._toggle_phrase_mode(False)
-            overlay.popup.web_btn.click()
-            open_url.assert_called_with("遣う", overlay, "kotobank")
+            # 懸停浮窗已精簡移除「線上辭典」，保留主面板語塊／獨立詞切換後按需查證
+            self.assertFalse(hasattr(overlay.popup, "web_btn"))
+            panel._toggle_phrase_mode(False)
+            panel.open_web_lookup("kotobank")
+            open_url.assert_called_once_with("遣う", panel, "kotobank")
 
             # 詞典管理視窗日英備援切換器煙霧測試
             from PySide6.QtCore import QThreadPool

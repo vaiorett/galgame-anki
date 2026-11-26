@@ -64,8 +64,14 @@ def _subtitle_snapshot(value: str) -> MpvSubtitleEvent | None:
             return None
     event = MpvSubtitleEvent(text.strip(), title, path, seconds(start), seconds(end))
     event.audio_stream_index = int(index) if index.isdigit() else None
-    event.external_audio_path = str(Path(cwd) / external) if external else ""
-    if lang.lower().split("-")[0] in {"zh", "chi", "zho", "cmn"}:
+    if external:
+        if "://" in external or Path(external).is_absolute():
+            event.external_audio_path = external
+        elif cwd:
+            event.external_audio_path = str(Path(cwd) / external)
+        else:
+            event.external_audio_path = external
+    if lang.lower().split("-")[0] in {"zh", "chi", "zho", "cmn", "chs", "cht"}:
         other_start, other_end = seconds(sub2_start), seconds(sub2_end)
         if None not in (event.sub_start, event.sub_end, other_start, other_end):
             if abs(other_start - event.sub_start) <= 0.35 and abs(other_end - event.sub_end) <= 0.35:
@@ -74,14 +80,13 @@ def _subtitle_snapshot(value: str) -> MpvSubtitleEvent | None:
 
 
 def _is_flatpak_mpv_installed() -> bool:
-    """快速無阻塞偵測系統或使用者目錄是否已安裝 Flatpak 版 io.mpv.Mpv。"""
+    """快速無阻塞偵測系統或使用者目錄是否已安裝 Flatpak 版 io.mpv.Mpv（排除已卸載殘留設定目錄）。"""
     if shutil.which("flatpak") is None:
         return False
-    # 1. 快速檔案系統檢查（零子進程延遲）
+    # 1. 快速檔案系統檢查（僅查實際安裝路徑，不看卸載後仍殘留的 ~/.var/app）
     candidates = (
         Path("/var/lib/flatpak/app") / FLATPAK_MPV_APP_ID,
         Path.home() / ".local" / "share" / "flatpak" / "app" / FLATPAK_MPV_APP_ID,
-        Path.home() / ".var" / "app" / FLATPAK_MPV_APP_ID,
     )
     if any(p.exists() for p in candidates):
         return True
@@ -167,8 +172,18 @@ def _patch_single_mpv_conf(cfg_file: Path, socket_path: str, hide_native_sub: bo
     cfg_file.parent.mkdir(parents=True, exist_ok=True)
     existing = cfg_file.read_text(encoding="utf-8", errors="ignore") if cfg_file.exists() else ""
     lines = existing.splitlines()
-    has_ipc = any(ln.strip().startswith("input-ipc-server=") for ln in lines)
-    has_sub_vis = any(ln.strip().startswith("sub-visibility=") for ln in lines)
+    # 僅在全域區段（第一個 [profile] 之前）視為全域生效
+    global_lines: list[str] = []
+    first_section_idx = -1
+    for idx, ln in enumerate(lines):
+        s = ln.strip()
+        if s.startswith("[") and s.endswith("]") and len(s) >= 3:
+            first_section_idx = idx
+            break
+        global_lines.append(s)
+
+    has_ipc = any(s.startswith("input-ipc-server=") for s in global_lines)
+    has_sub_vis = any(s.startswith("sub-visibility=") for s in global_lines)
 
     additions: list[str] = []
     if not has_ipc:
@@ -177,9 +192,15 @@ def _patch_single_mpv_conf(cfg_file: Path, socket_path: str, hide_native_sub: bo
         additions.append("sub-visibility=no")
 
     if additions:
-        suffix = "\n" if existing and not existing.endswith("\n") else ""
         block = "# GalAnki 字幕自動連線設定\n" + "\n".join(additions) + "\n"
-        cfg_file.write_text(f"{existing}{suffix}{block}", encoding="utf-8")
+        if first_section_idx >= 0:
+            before = "\n".join(lines[:first_section_idx]).rstrip()
+            after = "\n".join(lines[first_section_idx:])
+            new_text = (f"{before}\n\n{block}\n{after}\n" if before else f"{block}\n{after}\n")
+        else:
+            suffix = "\n" if existing and not existing.endswith("\n") else ""
+            new_text = f"{existing}{suffix}{block}"
+        cfg_file.write_text(new_text, encoding="utf-8")
     return cfg_file
 
 
@@ -351,7 +372,10 @@ class MpvSubtitleBridge(QObject):
             self.send_ipc_command(["set_property", "ab-loop-b", "no"])
             self.send_ipc_command(["set_property", "ab-loop-a", "no"])
             self._sentence_loop = False
-            self.loop_changed.emit(False)
+            try:
+                self.loop_changed.emit(False)
+            except RuntimeError:
+                pass
 
     def loop_subtitle(self, start: float, end: float) -> bool:
         if start < 0 or end <= start or not self._connected:
@@ -451,15 +475,22 @@ class MpvSubtitleBridge(QObject):
             self.set_speed(self._normal_speed)
             self._sped_up = False
         self._stop_event.set()
+        with self._sock_lock:
+            sock = self._active_sock
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
 
     def _loop(self) -> None:
         while not self._stop_event.is_set():
             sock_path = self._find_active_socket()
             if not sock_path:
-                time.sleep(1.5)
+                self._stop_event.wait(1.5)
                 continue
             self._run_session(sock_path)
-            time.sleep(1.0)
+            self._stop_event.wait(1.0)
 
     def _find_active_socket(self) -> str | None:
         candidates = (
@@ -468,8 +499,20 @@ class MpvSubtitleBridge(QObject):
             else discover_configured_mpv_sockets()
         )
         for path in candidates:
-            if Path(path).exists():
+            if not Path(path).exists():
+                continue
+            probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            probe.settimeout(0.35)
+            try:
+                probe.connect(path)
                 return path
+            except OSError:
+                continue
+            finally:
+                try:
+                    probe.close()
+                except OSError:
+                    pass
         return None
 
     def _run_session(self, sock_path: str) -> None:
@@ -484,7 +527,10 @@ class MpvSubtitleBridge(QObject):
         with self._sock_lock:
             self._active_sock = sock
         self._connected = True
-        self.connection_changed.emit(True, "mpv 已連線")
+        try:
+            self.connection_changed.emit(True, "mpv 已連線")
+        except RuntimeError:
+            pass
 
         observe_cmds = [
             {"command": ["observe_property", 1, "sub-text"]},
@@ -495,22 +541,14 @@ class MpvSubtitleBridge(QObject):
             {"command": ["observe_property", 6, "pause"]},
             {"command": ["observe_property", 7, "speed"]},
         ]
-        try:
-            for cmd in observe_cmds:
-                sock.sendall((json.dumps(cmd) + "\n").encode("utf-8"))
-        except OSError:
-            with self._sock_lock:
-                self._active_sock = None
-            sock.close()
-            self._connected = False
-            self.connection_changed.emit(False, "mpv 未連線")
-            return
-
         state: dict[str, object] = {}
         pending_text = ""
         snapshot_id = 100
         buf = b""
         try:
+            for cmd in observe_cmds:
+                sock.sendall((json.dumps(cmd) + "\n").encode("utf-8"))
+
             while not self._stop_event.is_set():
                 try:
                     chunk = sock.recv(4096)
@@ -534,12 +572,21 @@ class MpvSubtitleBridge(QObject):
                             if msg.get("error") == "success":
                                 self.set_pause(False)
                             else:
-                                self.navigation_failed.emit("mpv 在這個位置找不到可跳轉的字幕。")
+                                try:
+                                    self.navigation_failed.emit("mpv 在這個位置找不到可跳轉的字幕。")
+                                except RuntimeError:
+                                    break
                             continue
                         if msg.get("event") in ("start-file", "end-file"):
                             self.stop_sentence_loop()
                             self._last_sub_start = self._last_sub_end = None
                             pending_text = ""
+                            state.pop("last_sub", None)
+                            state.pop("last_sub_start", None)
+                            state.pop("sub_start", None)
+                            state.pop("sub_end", None)
+                            state["sub_active"] = False
+                            continue
                         if msg.get("event") == "property-change" and msg.get("name") == "sub-text":
                             pending_text = str(msg.get("data") or "").strip()
                             if pending_text:
@@ -560,9 +607,20 @@ class MpvSubtitleBridge(QObject):
                             if ev.text != pending_text:
                                 continue
                             pending_text = ""
+                            if (
+                                ev.text == state.get("last_sub")
+                                and ev.sub_start == state.get("last_sub_start")
+                            ):
+                                continue
+                            state["last_sub"] = ev.text
+                            state["last_sub_start"] = ev.sub_start
                         else:
                             ev = parse_mpv_ipc_message(msg, state)
                         self._paused = bool(state.get("paused", False))
+                        if not self._sped_up and isinstance(state.get("speed"), float):
+                            spd = float(state["speed"])
+                            if 0.5 <= spd <= 4.0:
+                                self._normal_speed = spd
                         if ev is not None:
                             self._on_sub_active(ev.sub_start, ev.sub_end)
                             try:
@@ -571,14 +629,22 @@ class MpvSubtitleBridge(QObject):
                                 break
                         elif state.pop("sub_just_cleared", False):
                             self._on_sub_cleared()
+        except OSError:
+            pass
         finally:
             self._cancel_speed_timer()
             self._sped_up = False
             self._sentence_loop = False
-            self.loop_changed.emit(False)
+            try:
+                self.loop_changed.emit(False)
+            except RuntimeError:
+                pass
             with self._sock_lock:
                 self._active_sock = None
-            sock.close()
+            try:
+                sock.close()
+            except OSError:
+                pass
             self._connected = False
             try:
                 self.connection_changed.emit(False, "mpv 未連線")

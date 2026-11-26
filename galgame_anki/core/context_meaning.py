@@ -51,6 +51,11 @@ def format_contextual_meaning(
 
     is_past = "過去" in joined
     is_neg = "否定" in joined
+    is_forbid = "禁止" in joined or "ちゃだめ" in joined or "てはだめ" in joined
+    is_must = "必須" in joined or "なければ" in joined or "なくては" in joined or "なきゃ" in joined
+    is_cmd = "命令" in joined
+    is_vol = "意志" in joined or "提議" in joined
+    is_explain = "解釋" in joined or "追問" in joined or "のだ" in joined
     is_pot = "可能" in joined
     is_pass = "被動" in joined and not is_pot
     is_caus = "使役" in joined
@@ -61,16 +66,20 @@ def format_contextual_meaning(
     is_cond = "假定" in joined or "たら" in joined or "ば" in joined
     is_try = "嘗試" in joined or "てみる" in joined
     is_prep = "預先" in joined or "ておく" in joined or "とく" in joined
-    is_te = "て形" in joined and not (is_prog or is_done or is_try or is_prep)
+    is_te = "て形" in joined and not (is_prog or is_done or is_try or is_prep or is_forbid or is_must)
 
-    # 依語氣與活用層次組裝自然中文語境表達
+    # 依語氣與活用層次正交組裝自然中文語境表達（確保禁止／必須／否定／過去不互相吞沒）
     phrase = head
     if is_caus:
         phrase = f"讓／使人{phrase}"
     elif is_pass:
         phrase = f"被{phrase}"
 
-    if is_pot:
+    if is_forbid:
+        phrase = f"不可以{phrase}／別{phrase}"
+    elif is_must:
+        phrase = f"必須{phrase}／非{phrase}不可"
+    elif is_pot:
         if is_neg and is_past:
             phrase = f"沒能{phrase}／做不到{phrase}"
         elif is_neg:
@@ -89,16 +98,44 @@ def format_contextual_meaning(
         else:
             phrase = f"想{phrase}"
     elif is_too:
-        phrase = f"太過{phrase}{'了' if is_past else ''}"
+        if is_neg and is_past:
+            phrase = f"當時沒有太過{phrase}"
+        elif is_neg:
+            phrase = f"沒有太過{phrase}"
+        else:
+            phrase = f"太過{phrase}{'了' if is_past else ''}"
     elif is_done:
-        phrase = f"不小心{phrase}掉了／徹底{phrase}完"
+        if is_neg and is_past:
+            phrase = f"當時沒有{phrase}掉"
+        elif is_neg:
+            phrase = f"不會{phrase}掉"
+        elif is_past:
+            phrase = f"不小心{phrase}掉了／徹底{phrase}完了"
+        else:
+            phrase = f"不小心{phrase}掉／徹底{phrase}完"
     elif is_try:
-        phrase = f"試著{phrase}{'看看' if not is_past else '了一下'}"
+        if is_neg and is_past:
+            phrase = f"當時沒試著{phrase}"
+        elif is_neg:
+            phrase = f"不試著{phrase}"
+        else:
+            phrase = f"試著{phrase}{'看看' if not is_past else '了一下'}"
     elif is_prep:
-        phrase = f"先預先{phrase}好"
+        if is_neg and is_past:
+            phrase = f"當時沒先{phrase}好"
+        elif is_neg:
+            phrase = f"不先{phrase}好"
+        elif is_past:
+            phrase = f"已經先{phrase}好了"
+        else:
+            phrase = f"先預先{phrase}好"
     elif is_prog:
-        if is_neg:
-            phrase = f"沒有在{phrase}"
+        if is_cmd:
+            phrase = f"繼續{phrase}著／保持{phrase}"
+        elif is_neg and is_past:
+            phrase = f"當時沒有在{phrase}／那時還沒{phrase}"
+        elif is_neg:
+            phrase = f"沒有在{phrase}／還沒{phrase}"
         elif is_past:
             phrase = f"當時正在{phrase}／{phrase}著"
         else:
@@ -108,6 +145,10 @@ def format_contextual_meaning(
             phrase = f"要是不{phrase}的話"
         else:
             phrase = f"要是{phrase}了的話"
+    elif is_cmd:
+        phrase = f"快{phrase}／命令去{phrase}"
+    elif is_vol:
+        phrase = f"來{phrase}吧／打算{phrase}"
     elif is_neg and is_past:
         phrase = f"沒有{phrase}／不{phrase}了"
     elif is_neg:
@@ -118,6 +159,9 @@ def format_contextual_meaning(
         phrase = f"{phrase}（並且／然後…）"
     else:
         return f"{clean_base}（句中活用：{' → '.join(reasons)}）"
+
+    if is_explain and "解釋" not in phrase:
+        phrase = f"{phrase}（解釋／強調語氣）"
 
     # 若原形詞義比單一 head 更豐富，附帶精簡原形對照（如「明白了（原形：明白、懂、理解）」）
     short_base = clean_base[:32] + ("…" if len(clean_base) > 32 else "")
@@ -144,12 +188,15 @@ def rank_senses_by_context(
     sentence_translation: str = "",
     raw_sentence: str = "",
     target_surface: str = "",
+    token_start: int = -1,
 ) -> list[str]:
     """結合「整句譯文重疊度 ＋ 日語句法／自他動詞／搭配線索」，將最貼合本句語境的重點釋義排到第 1 位！"""
     if len(senses) <= 1:
         return list(senses)
 
-    tr_norm = (sentence_translation or "").translate(_S2T_CTX).strip()
+    from galgame_anki.core.dictionary import normalize_zh_tw
+
+    tr_norm = normalize_zh_tw(sentence_translation or "").translate(_S2T_CTX).strip()
     tr_chars = set(re.findall(r"[\u4e00-\u9fff]", tr_norm))
 
     # 分析日語原句中目標詞前後的語境線索（即使完全沒開翻譯也能準確選義項！）
@@ -160,7 +207,7 @@ def rank_senses_by_context(
     has_speech_clue = bool(_SPEECH_CLUE_RE.search(raw_sentence or ""))
     is_kimi_dialogue = False
     if raw_sentence and target_surface:
-        pos = raw_sentence.find(target_surface)
+        pos = token_start if (0 <= token_start < len(raw_sentence)) else raw_sentence.find(target_surface)
         if pos > 0:
             before = raw_sentence[max(0, pos - 14) : pos]
             has_wo_before = bool(_TRANSITIVE_CLUE_RE.search(before))
@@ -172,7 +219,7 @@ def rank_senses_by_context(
     def _score(idx_sense: tuple[int, str]) -> tuple[int, int]:
         idx, sense = idx_sense
         score = 0
-        s_norm = sense.translate(_S2T_CTX)
+        s_norm = normalize_zh_tw(sense).translate(_S2T_CTX)
         s_low = sense.lower()
 
         # 1. 與整句中文理解的字詞／雙字詞重疊（權重最高）
@@ -186,7 +233,7 @@ def rank_senses_by_context(
                     bigram_hits += 1
             score += bigram_hits * 8 + overlap * 2
 
-        # 2. 具體上下文與慣用搭配線索（優先於來源順序）
+        # 2. 具體上下文與慣用搭配線索（僅限定在目標詞自身，不汙染同句其他單詞）
         if is_kimi_dialogue:
             if s_norm in ("你", "妳") or "you" in s_low or "二人称" in s_norm:
                 score += 12
@@ -197,14 +244,16 @@ def rank_senses_by_context(
                 score += 10
             elif "君主國" in s_norm or "monarchy" in s_low:
                 score -= 10
-        if "さすがに" in (target_surface or "") or ("さすがに" in (raw_sentence or "") and "さすがの" not in (raw_sentence or "")):
+        if "さすがに" in (target_surface or "") or target_surface == "さすが":
             if any(k in s_norm for k in ("畢竟", "的確", "果然", "不愧", "還是")) or any(
                 k in s_low for k in ("expect", "naturally", "indeed", "after all")
             ):
                 score += 9
             elif "即使" in s_norm and "畢竟" not in s_norm:
                 score -= 4
-        if "腰を折" in (target_surface or "") or "腰を折" in (raw_sentence or ""):
+        if "腰を折" in (target_surface or "") or (
+            target_surface and ("折" in target_surface or target_surface == "腰") and "腰を折" in (raw_sentence or "")
+        ):
             if has_bow_clue:
                 if any(k in s_low for k in ("bend", "waist", "彎腰", "鞠躬")):
                     score += 12
@@ -256,7 +305,7 @@ def explain_lookup_in_sentence(token: "Token", sentence: str, translation: str) 
     zh_senses = [s.text for s in by_lang["zh"]]
     en_senses = [s.text for s in by_lang["en"]]
     senses = zh_senses if zh_senses else en_senses
-    ranked = rank_senses_by_context(senses, translation, sentence, token.surface)
+    ranked = rank_senses_by_context(senses, translation, sentence, token.surface, token_start=token.start)
     meaning = ranked[0] if ranked else ""
     reasons = match.reasons if match else ()
     lemma = token.lemma
@@ -271,7 +320,7 @@ def explain_lookup_in_sentence(token: "Token", sentence: str, translation: str) 
         if subject:
             noun = subject[1]
             if noun in ("地球", "世界", "惑星"):
-                if token.surface.endswith("たら"):
+                if token.surface.endswith("たら") and "なかっ" not in token.surface:
                     return f"如果{('行星' if noun == '惑星' else noun)}毀了……", "「〜たら」先提出假設，後半句才會交代結果。"
                 meaning = "毀壞、毀滅"
             elif noun in ("機械", "装置", "テレビ", "スマホ", "パソコン", "冷蔵庫"):
@@ -280,7 +329,7 @@ def explain_lookup_in_sentence(token: "Token", sentence: str, translation: str) 
                 meaning = "破裂" if noun in ("交渉", "関係") else "告吹"
             else:
                 meaning = "破碎"
-        else:
+        elif not meaning:
             meaning = "損壞"
     if token.surface == "さすがに" and re.match(r"(?:それは|これは|もう)?\s*(?:無理|むり|難し|厳し)", after):
         return "實在", "這裡是說情況已超過能應付的程度。例句可理解成「這實在辦不到」。"

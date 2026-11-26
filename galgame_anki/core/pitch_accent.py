@@ -265,7 +265,7 @@ def render_pitch_graphs_html(
             bg = meta["bg_dark"] if dark_mode else meta["bg_light"]
             tag_html = (
                 f'<span class="{badge_cls}" style="color:{fg}; background:{bg}; '
-                f'border:1px solid {fg}; border-radius:5px; padding:1px 6px; font-size:11px; font-weight:700;">'
+                f'border:1px solid {fg}; border-radius:5px; padding:1px 6px; font-size:11px; font-weight:500;">'
                 f"{html.escape(info.badge_text())}</span>"
             )
         chips.append(f'<span class="pitch-item pt-{info.pitch_type}">{svg}{tag_html}</span>')

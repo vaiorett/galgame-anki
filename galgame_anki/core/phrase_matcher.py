@@ -14,7 +14,7 @@ from galgame_anki.core.dictionary import (
     is_katakana_loanword,
 )
 from galgame_anki.core.tokenizer import Token
-from galgame_anki.core.verb_lesson import spoken_surfaces, verb_group
+from galgame_anki.core.verb_lesson import spoken_reasons_for_surface, spoken_surfaces, verb_group
 
 # 不作為多詞語塊開頭或結尾的純語氣／格助詞（保留結尾「に」供「さすがに」「本当に」等副詞語塊）
 _BAD_EDGE_START = frozenset({"は", "が", "を", "の", "に", "で", "へ", "と", "も", "よ", "ね", "ぞ", "わ", "か", "だ", "です"})
@@ -93,7 +93,10 @@ def _lookup_inflected_phrase(
         m = dictionary.lookup_exact_or_deinflect(base_phrase)
         if m is None or not _has_usable_sense(m):
             continue
-        if not any(pos_matches_rule(e.pos, cand.rules) for e in m.all_entries):
+        if not any(
+            pos_matches_rule(e.pos, cand.rules) or "exp" in re.split(r"[\s,/]+", (e.pos or "").lower())
+            for e in m.all_entries
+        ):
             continue
         return LookupMatch(
             surface=span,
@@ -153,11 +156,28 @@ def find_phrase_for_token(
     cand_spans: list[tuple[int, int, str, str, str]] = []
     probe_keys: set[str] = set()
 
-    spoken_lemmas = {}
+    spoken_lemmas: dict[int, tuple[str, tuple[str, ...]]] = {}
     for j in range(left_bound + 1, right_bound + 1):
         tail = tokens[j]
-        if tail.verb_type and tail.surface in spoken_surfaces(tail.lemma, verb_group(tail.lemma, tail.verb_type)):
-            spoken_lemmas[j] = tail.lemma
+        pos_candidates = [tail.verb_type]
+        if tail.lookup:
+            pos_candidates.extend(e.pos for e in tail.lookup.all_entries)
+        for pos in pos_candidates:
+            grp = verb_group(tail.lemma, pos)
+            if grp and tail.surface in spoken_surfaces(tail.lemma, grp):
+                spoken_lemmas[j] = (
+                    tail.lemma,
+                    spoken_reasons_for_surface(tail.lemma, grp, tail.surface),
+                )
+                break
+
+    deinflect_cache: dict[str, list] = {}
+    for j in range(left_bound + 1, right_bound + 1):
+        ls = tokens[j].surface
+        if ls not in deinflect_cache:
+            deinflect_cache[ls] = [
+                dc for dc in deinflect(ls) if dc.rules != RULE_NONE and dc.term != ls
+            ]
 
     for i in range(left_bound, idx + 1):
         first_surf = tokens[i].surface
@@ -181,10 +201,9 @@ def find_phrase_for_token(
             cand_spans.append((i, j, span, prefix, last_surf))
             probe_keys.add(span)
             if j in spoken_lemmas:
-                probe_keys.add(prefix + spoken_lemmas[j])
-            for dc in deinflect(last_surf):
-                if dc.rules != RULE_NONE and dc.term != last_surf:
-                    probe_keys.add(prefix + dc.term)
+                probe_keys.add(prefix + spoken_lemmas[j][0])
+            for dc in deinflect_cache.get(last_surf, ()):
+                probe_keys.add(prefix + dc.term)
 
     if not cand_spans:
         return None
@@ -203,11 +222,12 @@ def find_phrase_for_token(
     for i, j, span, prefix, last_surf in cand_spans:
         match = _lookup_inflected_phrase(span, prefix, last_surf, dictionary, hit_terms)
         if match is None and j in spoken_lemmas:
-            headword = prefix + spoken_lemmas[j]
+            tail_lemma, tail_reasons = spoken_lemmas[j]
+            headword = prefix + tail_lemma
             if headword in hit_terms:
                 base = dictionary.lookup_exact_or_deinflect(headword)
                 if base and base.lemma == headword and _has_usable_sense(base):
-                    match = replace(base, surface=span)
+                    match = replace(base, surface=span, reasons=tail_reasons or base.reasons)
         if match is None:
             continue
         # 避免把純「副詞/連體詞+名詞」誤收；優先有明確詞性與讀音的完整詞條

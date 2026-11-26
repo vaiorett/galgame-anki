@@ -5,8 +5,8 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
                                QPushButton, QSplitter, QTextBrowser, QVBoxLayout, QWidget)
 
-from galgame_anki.core.japanese_reference import ReferenceIndex
-from galgame_anki.ui.theme import get_palette
+from galgame_anki.core.japanese_reference import get_reference_index
+from galgame_anki.ui.theme import RICHTEXT_WEIGHT_CSS, get_palette
 
 
 class JapaneseReference(QWidget):
@@ -15,7 +15,7 @@ class JapaneseReference(QWidget):
 
     def __init__(self, grammar, theme_name):
         super().__init__()
-        self.index = ReferenceIndex(grammar)
+        self.index = get_reference_index(grammar)
         self.group = None
         layout = QVBoxLayout(self)
         bar = QHBoxLayout()
@@ -23,7 +23,7 @@ class JapaneseReference(QWidget):
         self.browse.clicked.connect(self.home)
         self.search = QLineEdit()
         self.search.setClearButtonEnabled(True)
-        self.search.setPlaceholderText("搜尋中文、日文或讀音，例如 4月、三個人、はつか、被動")
+        self.search.setPlaceholderText("搜尋中文、日文、假名或羅馬音（例如 4月、三個人、はつか、shi、被動、上手）")
         self.search.setAccessibleName("搜尋全部日語要點")
         bar.addWidget(self.browse)
         bar.addWidget(self.search, 1)
@@ -37,7 +37,7 @@ class JapaneseReference(QWidget):
         self.reader = QTextBrowser()
         palette = get_palette(theme_name)
         self.reader.document().setDefaultStyleSheet(
-            f"a {{ color: {palette.pill_info_fg}; }} h2 {{ color: {palette.accent_lilac}; }}"
+            f"{RICHTEXT_WEIGHT_CSS} a {{ color: {palette.pill_info_fg}; }} h2 {{ color: {palette.accent_lilac}; }}"
         )
         self.reader.setOpenLinks(False)
         self.reader.document().setDocumentMargin(12)
@@ -120,14 +120,19 @@ class JapaneseReference(QWidget):
         if url.scheme() == "topic":
             self.open_topic(url.path())
         elif self.results.currentItem():
-            _, key, _ = self.results.currentItem().data(Qt.ItemDataRole.UserRole)
+            kind, key, _ = self.results.currentItem().data(Qt.ItemDataRole.UserRole)
             if url.scheme() == "group":
-                self.group = self.index.topics[key].group
+                if kind == "topic" and key in self.index.topics:
+                    self.group = self.index.topics[key].group
+                elif kind == "group":
+                    self.group = key
+                else:
+                    return
                 self.search.clear()
                 self.refresh()
-            elif key.startswith("study-"):
+            elif kind == "topic" and key.startswith("study-"):
                 self.lesson_requested.emit(key.removeprefix("study-"))
-            elif key.startswith("pattern-"):
+            elif kind == "topic" and key.startswith("pattern-"):
                 self.pattern_requested.emit(key.removeprefix("pattern-"))
 
     def open_topic(self, key):

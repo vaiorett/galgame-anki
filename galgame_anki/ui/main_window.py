@@ -34,6 +34,7 @@ from galgame_anki.adapters.media_utils import (
     extract_video_audio_mp3,
     extract_video_frame_webp,
     play_mp3_bytes_async,
+    stop_active_audio_preview,
 )
 from galgame_anki.adapters.hook_engine import (
     GameHookManager,
@@ -45,6 +46,7 @@ from galgame_anki.adapters.hook_engine import (
     list_wine_tasklist,
 )
 from galgame_anki.adapters.mpv_bridge import MpvSubtitleBridge, MpvSubtitleEvent
+from galgame_anki.adapters.okular_bridge import query_okular_context
 from galgame_anki.adapters.text_sources import TextIngestionManager
 from galgame_anki.config import AppConfig
 from galgame_anki.core.anki_client import (
@@ -54,6 +56,7 @@ from galgame_anki.core.anki_client import (
 )
 from galgame_anki.core.context_meaning import context_gloss_is_chinese, explain_lookup_in_sentence, format_contextual_meaning, rank_senses_by_context
 from galgame_anki.core.dictionary import DictionaryEngine
+from galgame_anki.core.study_map import focus_for
 from galgame_anki.core.verb_lesson import VerbLesson
 from galgame_anki.core.grammar_engine import (
     OfflineGrammarEngine,
@@ -132,7 +135,8 @@ class MainWindow(QMainWindow):
         self._selected_token: Token | None = None
         self._anki_connected: bool = False
         self._anki_launch_attempted: bool = False
-        self._last_mined_was_known: dict[int, bool] = {}
+        self._last_mined_meta: dict[int, tuple[bool, int]] = {}
+        self._blueprint_dialog: LearningBlueprintDialog | None = None
         self._tray_available: bool = False
         self.tray_icon: QSystemTrayIcon | None = None
         self._force_quit: bool = False
@@ -156,6 +160,7 @@ class MainWindow(QMainWindow):
             font_size=self.config.overlay_font_size,
             always_on_top=self.config.overlay_always_on_top,
             text_align=self.config.overlay_text_align,
+            blind_listen=self.config.overlay_blind_listen,
         )
         self.overlay.mine_requested.connect(self._mine_record_token)
         self.overlay.copy_prompt_requested.connect(self._copy_web_ai_prompt_for_record)
@@ -169,6 +174,8 @@ class MainWindow(QMainWindow):
         self.overlay.merge_prev_requested.connect(self._merge_previous_sentence)
         self.overlay.open_console_requested.connect(self.show_console_window)
         self.overlay.audio_preview_requested.connect(self._preview_current_audio)
+        self.overlay.workbench_requested.connect(self._open_study_workbench)
+        self.overlay.queue_study_requested.connect(self._enqueue_study_sentence)
         self.overlay.visibility_changed.connect(self._on_overlay_visibility_changed)
         self.overlay.replace_mode_changed.connect(self._on_overlay_replace_mode_changed)
         self.overlay.state_saved.connect(self._on_overlay_state_saved)
@@ -211,10 +218,10 @@ class MainWindow(QMainWindow):
         self._rebuild_game_menu()
         tl.addWidget(self.game_btn)
 
-        # 2. 切回只留覆蓋層模式
+        # 2. 手動開關字幕覆蓋層（不自動關閉或隱藏主視窗）
         self.overlay_btn = QPushButton("覆蓋層")
         self.overlay_btn.setCheckable(True)
-        self.overlay_btn.setToolTip("顯示字幕覆蓋層並收起控制台，筆電螢幕留給遊戲／mpv")
+        self.overlay_btn.setToolTip("手動顯示／隱藏字幕覆蓋層（不會關閉主頁）")
         self.overlay_btn.clicked.connect(self._on_overlay_btn_clicked)
         tl.addWidget(self.overlay_btn)
 
@@ -368,11 +375,9 @@ class MainWindow(QMainWindow):
         self.lookup_panel.mine_requested.connect(self._on_panel_mine)
         self.lookup_panel.copy_prompt_requested.connect(self._on_panel_copy_prompt)
         self.lookup_panel.audio_preview_requested.connect(self._preview_current_audio)
-        self.lookup_panel.blueprint_requested.connect(self.open_learning_blueprint)
-        self.overlay.popup.lesson_requested.connect(self._open_verb_lesson)
+        self.lookup_panel.blueprint_requested.connect(self._open_grammar_blueprint)
         self.lookup_panel.lesson_requested.connect(self._open_verb_lesson)
         self.lookup_panel.study_link.requested.connect(self._open_study_focus)
-        self.overlay.popup.study_link.requested.connect(self._open_study_focus)
         left_layout.addWidget(self.lookup_panel, 1)
 
         self.splitter.addWidget(left_col)
@@ -385,7 +390,7 @@ class MainWindow(QMainWindow):
         hd.setSpacing(6)
 
         hd_title = QLabel("近期台詞（50 句）")
-        hd_title.setStyleSheet("font-weight: 700; background: transparent;")
+        hd_title.setStyleSheet("font-weight: 500; background: transparent;")
         hd.addWidget(hd_title)
 
         self.history_list = QListWidget()
@@ -424,6 +429,14 @@ class MainWindow(QMainWindow):
         act_mgr.triggered.connect(self.open_hook_manager)
         self.game_menu.addAction(act_mgr)
 
+        self.game_menu.addSeparator()
+
+        self.act_okular_mode = QAction("Okular 閱讀伴讀（剪貼簿自動接句）", self)
+        self.act_okular_mode.setCheckable(True)
+        self.act_okular_mode.setChecked(self.config.okular_companion_enabled)
+        self.act_okular_mode.triggered.connect(self._toggle_okular_companion)
+        self.game_menu.addAction(self.act_okular_mode)
+
         if self.config.recent_games:
             self.game_menu.addSeparator()
             hdr = QAction("最近遊玩", self)
@@ -447,7 +460,7 @@ class MainWindow(QMainWindow):
 
         # 學習
         act_bp = QAction("語法與詞彙地圖\tCtrl+B", self)
-        act_bp.triggered.connect(self.open_learning_blueprint)
+        act_bp.triggered.connect(lambda _c=False: self._open_current_map())
         self.more_menu.addAction(act_bp)
 
         act_bank = QAction("1T 句庫挖礦\tCtrl+Shift+M", self)
@@ -550,6 +563,12 @@ class MainWindow(QMainWindow):
         act_mpv.triggered.connect(self.open_media_bridge)
         menu.addAction(act_mpv)
 
+        act_okular_tray = QAction("Okular 閱讀伴讀（剪貼簿）", self)
+        act_okular_tray.setCheckable(True)
+        act_okular_tray.setChecked(self.config.okular_companion_enabled)
+        act_okular_tray.triggered.connect(self._toggle_okular_companion)
+        menu.addAction(act_okular_tray)
+
         if self.config.recent_games:
             recent_sub = menu.addMenu("最近遊玩")
             for item in self.config.recent_games[:5]:
@@ -566,7 +585,7 @@ class MainWindow(QMainWindow):
 
         tools_sub = menu.addMenu("工具")
         for label, cb in [
-            ("語法與詞彙地圖", self.open_learning_blueprint),
+            ("語法與詞彙地圖", self._open_current_map),
             ("1T 句庫挖礦", self.open_sentence_bank),
             ("純人聲解包", lambda: self.open_voice_pack_manager(initial_tab=0)),
             ("角色聽力匯出", lambda: self.open_voice_pack_manager(initial_tab=1)),
@@ -626,13 +645,8 @@ class MainWindow(QMainWindow):
             self.hide()
 
     def _on_overlay_btn_clicked(self, checked: bool) -> None:
-        if checked:
-            self._toggle_overlay(True)
-            if self._tray_available and self.config.start_in_tray_overlay:
-                self.hide()
-                self.undo_toast.show_info("已切換覆蓋層模式（點系統匣圖示可開控制台）", 3000)
-        else:
-            self._toggle_overlay(False)
+        # 打開或關閉覆蓋層時一律保留主視窗不自動關閉／隱藏
+        self._toggle_overlay(bool(checked))
 
     def quit_application(self) -> None:
         """真正退出整個應用程式（清理 KWin 置頂、Hook、mpv 與資料庫連線）。"""
@@ -689,8 +703,22 @@ class MainWindow(QMainWindow):
 
         if self.config.ws_enabled:
             self.ingestion.start_websocket(self.config.ws_host, self.config.ws_port)
-        if self.config.clipboard_watch:
+        if self.config.clipboard_watch or self.config.okular_companion_enabled:
             self.ingestion.start_clipboard_watch()
+
+    def _start_worker(self, worker: FunctionWorker) -> None:
+        """統一管理背景執行緒生命週期，完成或失敗後自動釋放參照避免記憶體堆積。"""
+        self._active_workers.append(worker)
+
+        def _cleanup(_arg: object = None, w: FunctionWorker = worker) -> None:
+            try:
+                self._active_workers.remove(w)
+            except ValueError:
+                pass
+
+        worker.signals.finished.connect(_cleanup)
+        worker.signals.failed.connect(_cleanup)
+        self.thread_pool.start(worker)
 
     # === 主題與階段切換 ===
     def _apply_theme(self, theme_name: str, save: bool = True) -> None:
@@ -708,11 +736,15 @@ class MainWindow(QMainWindow):
         self.lookup_panel.set_theme_name(theme_name)
         self.overlay.apply_theme(theme_name)
         self.undo_toast.apply_theme(theme_name)
+        if self._blueprint_dialog is not None:
+            self._blueprint_dialog.theme_name = theme_name
+            self._blueprint_dialog.study_map.set_theme_name(theme_name)
+            self._blueprint_dialog.refresh_progress()
 
     def _toggle_theme(self) -> None:
         next_theme = "starlight" if self.config.ui_theme == "sakura" else "sakura"
         self._apply_theme(next_theme, save=True)
-        label = "🌙 星夜琉璃" if next_theme == "starlight" else "🌸 櫻霧輕透"
+        label = "星夜琉璃" if next_theme == "starlight" else "櫻霧輕透"
         self.statusBar().showMessage(f"已切換主題：{label}", 3000)
 
     def _apply_stage_ui(self) -> None:
@@ -794,8 +826,7 @@ class MainWindow(QMainWindow):
                 rec.audio_source = "silent"
 
         worker = FunctionWorker(_match)
-        self._active_workers.append(worker)
-        self.thread_pool.start(worker)
+        self._start_worker(worker)
 
     def _extract_audio_for_record(self, rec: SentenceRecord) -> tuple[bytes, str] | None:
         # 1. 若為 mpv 本地影片且帶有準確字幕時間軸，優先由 FFmpeg 無損直接裁切原聲！
@@ -860,8 +891,7 @@ class MainWindow(QMainWindow):
         worker.signals.failed.connect(
             lambda err: self.preview_failed.emit(f"語音試聽失敗：{err}")
         )
-        self._active_workers.append(worker)
-        self.thread_pool.start(worker)
+        self._start_worker(worker)
 
     def _on_audio_preview_ready(self, clip: tuple[bytes, str] | None, rec: SentenceRecord) -> None:
         if not clip and rec.source == "mpv":
@@ -900,22 +930,29 @@ class MainWindow(QMainWindow):
             return
         self._anki_launch_attempted = False
         self.anki_pill.setText("啟動 Anki…")
-        self.statusBar().showMessage("🚀 正在背景啟動 Anki 並自動最小化…", 5000)
-        self._background_sync_anki(allow_auto_launch=True)
+        self.statusBar().showMessage("正在啟動 Anki 並連線 AnkiConnect…", 6000)
+        self._background_sync_anki(allow_auto_launch=True, force_launch=True)
 
-    def _background_sync_anki(self, allow_auto_launch: bool = True) -> None:
+    def _background_sync_anki(
+        self,
+        allow_auto_launch: bool = True,
+        force_launch: bool = False,
+    ) -> None:
         def _sync() -> dict:
             launched_msg = ""
             try:
                 ver = self.anki.ping()
             except Exception:
-                if allow_auto_launch and self.config.auto_launch_anki and not self._anki_launch_attempted:
+                should_launch = force_launch or (
+                    allow_auto_launch and self.config.auto_launch_anki and not self._anki_launch_attempted
+                )
+                if should_launch:
                     self._anki_launch_attempted = True
-                    ok, msg = launch_anki_background(minimize_on_wayland=True)
+                    ok, msg = launch_anki_background(minimize_on_wayland=not force_launch)
                     if ok:
                         launched_msg = msg
                         ver = None
-                        for _ in range(15):
+                        for _ in range(18):
                             if self._closing:
                                 break
                             time.sleep(1.2)
@@ -925,7 +962,9 @@ class MainWindow(QMainWindow):
                             except Exception:
                                 continue
                         if ver is None:
-                            raise RuntimeError("背景啟動 Anki 逾時，請確認已安裝 AnkiConnect (2055492159)")
+                            raise RuntimeError(
+                                "已啟動 Anki，但連線 AnkiConnect 逾時（請確認已安裝外掛 2055492159 或完成設定檔選擇）"
+                            )
                     else:
                         raise RuntimeError(msg)
                 else:
@@ -948,9 +987,10 @@ class MainWindow(QMainWindow):
 
         worker = FunctionWorker(_sync)
         worker.signals.finished.connect(self._on_anki_sync_ok)
-        worker.signals.failed.connect(self._on_anki_sync_fail)
-        self._active_workers.append(worker)
-        self.thread_pool.start(worker)
+        worker.signals.failed.connect(
+            lambda err, forced=force_launch: self._on_anki_sync_fail(err, show_status=forced)
+        )
+        self._start_worker(worker)
 
     def _on_anki_sync_ok(self, info: dict) -> None:
         if self._closing:
@@ -972,18 +1012,42 @@ class MainWindow(QMainWindow):
         if self._current_record is not None:
             self._retokenize_current()
 
-    def _on_anki_sync_fail(self, _err: str) -> None:
+    def _on_anki_sync_fail(self, err: str, show_status: bool = False) -> None:
         self._anki_connected = False
         self.anki_pill.setText("啟動 Anki")
-        self.anki_pill.setToolTip("點擊於背景啟動 Anki 並自動最小化")
+        self.anki_pill.setToolTip("點擊啟動 Anki 並連線 AnkiConnect")
         self.anki_pill.setObjectName("PillWarn")
         self.anki_pill.style().unpolish(self.anki_pill)
         self.anki_pill.style().polish(self.anki_pill)
         self._rebuild_tray_menu()
+        if show_status and err:
+            self.statusBar().showMessage(f"Anki 啟動／連線失敗：{err}", 7000)
 
-    # === 多來源文本進流（Galgame Hook / mpv 影片 / OCR / 剪貼簿） ===
+    # === 多來源文本進流（Galgame Hook / mpv 影片 / Okular 伴讀 / 剪貼簿） ===
     def _on_ingestion_sentence_meta(self, text: str, source: str, media_title: str) -> None:
-        self._ingest_sentence(text, source=source, media_title=media_title)
+        rec = self._ingest_sentence(text, source=source, media_title=media_title)
+        if source == "clipboard" and not media_title and self.config.okular_companion_enabled and rec is not None:
+            self._enrich_record_with_okular_context(rec)
+
+    def _enrich_record_with_okular_context(self, rec: SentenceRecord) -> None:
+        """背景靜默查詢執行中 Okular 的書名與頁碼，補上 SourceGame 來源標籤（不阻塞查詞）。"""
+        def _query():
+            return query_okular_context(timeout=0.5)
+
+        def _done(ctx: Any) -> None:
+            if self._closing or ctx is None or not getattr(ctx, "label", ""):
+                return
+            rec.media_title = ctx.label
+            if self._current_record is rec:
+                short = ctx.label[:24] + ("…" if len(ctx.label) > 24 else "")
+                self.game_badge.setText(short)
+                self.game_badge.setObjectName("PillOk")
+                self.game_badge.style().unpolish(self.game_badge)
+                self.game_badge.style().polish(self.game_badge)
+
+        worker = FunctionWorker(_query)
+        worker.signals.finished.connect(_done)
+        self._start_worker(worker)
 
     def _on_mpv_state_changed(self, connected: bool, msg: str) -> None:
         self.overlay.set_mpv_connected(connected)
@@ -1077,7 +1141,7 @@ class MainWindow(QMainWindow):
         sub_start: float | None = None,
         sub_end: float | None = None,
         mpv_event: MpvSubtitleEvent | None = None,
-    ) -> None:
+    ) -> SentenceRecord:
         prev_rec = self.store.latest()
         tokenized = self.tokenizer.tokenize(text, self.store.known_words)
         analysis = self.grammar_engine.analyze(tokenized)
@@ -1112,6 +1176,7 @@ class MainWindow(QMainWindow):
         self._display_record(rec)
         if self.overlay.isVisible():
             self.overlay.show_record(rec)
+        return rec
 
     def _snapshot_scene_in_background(self, rec: SentenceRecord) -> None:
         def _snap() -> None:
@@ -1125,8 +1190,7 @@ class MainWindow(QMainWindow):
                 rec.screenshot_clip = shot
 
         worker = FunctionWorker(_snap)
-        self._active_workers.append(worker)
-        self.thread_pool.start(worker)
+        self._start_worker(worker)
 
     def _check_current_sentence_translation(self) -> None:
         if self._current_record is None:
@@ -1145,8 +1209,7 @@ class MainWindow(QMainWindow):
         worker = FunctionWorker(translate_sentence_free, original)
         worker.signals.finished.connect(lambda tr: self._on_sentence_trans_ok(rec, tr, original))
         worker.signals.failed.connect(self._on_sentence_trans_fail)
-        self._active_workers.append(worker)
-        self.thread_pool.start(worker)
+        self._start_worker(worker)
 
     def _on_overlay_state_saved(self, state: dict) -> None:
         self.config.overlay_x = int(state.get("x", -1))
@@ -1155,6 +1218,7 @@ class MainWindow(QMainWindow):
         self.config.overlay_height = int(state.get("height", 128))
         self.config.overlay_locked = bool(state.get("locked", False))
         self.config.overlay_hover_lookup = bool(state.get("hover_lookup", True))
+        self.config.overlay_blind_listen = bool(state.get("blind_listen", self.config.overlay_blind_listen))
         self.config.overlay_always_on_top = bool(state.get("always_on_top", True))
         self.config.overlay_replace_mode = bool(state.get("replace_mode", True))
         self.config.overlay_backdrop = str(state.get("backdrop", "vn_dark"))
@@ -1176,8 +1240,7 @@ class MainWindow(QMainWindow):
         worker = FunctionWorker(translate_sentence_free, original)
         worker.signals.finished.connect(lambda tr: self._on_sentence_trans_ok(rec, tr, original))
         worker.signals.failed.connect(self._on_sentence_trans_fail)
-        self._active_workers.append(worker)
-        self.thread_pool.start(worker)
+        self._start_worker(worker)
 
     def _on_sentence_trans_ok(self, rec: SentenceRecord, trans: str, original: str | None = None) -> None:
         self.translate_btn.setEnabled(True)
@@ -1266,6 +1329,10 @@ class MainWindow(QMainWindow):
         if auto_tok is not None:
             self._selected_token = auto_tok
             self._show_token_in_panel(auto_tok)
+        else:
+            self._selected_token = None
+            self.lookup_panel.clear_token()
+            self.lookup_panel.set_word_associations(None)
 
     def _refresh_history_list(self, select_record_id: int | None = None) -> None:
         self.history_list.blockSignals(True)
@@ -1385,8 +1452,7 @@ class MainWindow(QMainWindow):
             if (not self._closing and getattr(self, "_assoc_req_id", 0) == rid)
             else None
         )
-        self._active_workers.append(worker)
-        self.thread_pool.start(worker)
+        self._start_worker(worker)
 
     # === 零付費 API：一鍵複製高品質提問詞給 Google AI Pro / ChatGPT Plus ===
     def _on_panel_copy_prompt(self, token: Token | None) -> None:
@@ -1409,11 +1475,12 @@ class MainWindow(QMainWindow):
         )
         cb = QGuiApplication.clipboard()
         if cb is not None:
+            self.ingestion.mark_self_copied(prompt)
             cb.setText(prompt)
-        msg = "📋 已複製日語拆解提問詞！直接 Ctrl+V 貼到你的 Gemini Pro / ChatGPT Plus 網頁版即可。"
+        msg = "已複製日語拆解提問詞！直接 Ctrl+V 貼到 Gemini / ChatGPT 即可。"
         self.statusBar().showMessage(msg, 5500)
         if self.overlay.isVisible():
-            self.overlay.show_toast("📋 已複製提問詞，去貼給 Gemini / GPT！")
+            self.overlay.show_toast("已複製提問詞，可貼給 Gemini / GPT")
 
     # === Refold 精煉製卡（精選核心釋義 + 聲優原聲 + 畫面 CG + 語境理解 + 離線語序句型） ===
     def _on_panel_mine(self, token: Token) -> None:
@@ -1491,25 +1558,6 @@ class MainWindow(QMainWindow):
         analysis = record.grammar_analysis or self.grammar_engine.analyze(record.tokenized)
         source_name = record.media_title or self.config.current_game_name or record.source
 
-        # 先取出音訊、畫面快照與聯想記憶樹供精煉確認或直寫
-        audio_clip = self._extract_audio_for_record(record)
-        shot_clip = record.screenshot_clip
-        include_audio_default = self.config.capture_audio_on_mine and (audio_clip is not None)
-
-        assoc_html = ""
-        assoc_preview = ""
-        if particle is None and lemma:
-            assoc_tree = self.word_associations.build_tree(
-                lemma=lemma,
-                reading=reading,
-                known_words=self.store.known_words,
-                current_sentence=record.raw_text,
-                active_pack_id=self._resolve_voice_pack_id(record) or "",
-            )
-            if not assoc_tree.is_empty():
-                assoc_html = assoc_tree.to_anki_html()
-                assoc_preview = assoc_tree.to_compact_preview_text()
-
         shift_held = bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
         should_open_forge = (
             force_forge
@@ -1517,7 +1565,31 @@ class MainWindow(QMainWindow):
             else (self.config.quick_forge_before_mine or shift_held)
         )
 
+        need_assoc = particle is None and bool(lemma)
+        known_snap = set(self.store.known_words)
+        pack_id_snap = self._resolve_voice_pack_id(record) or ""
+        want_audio = self.config.capture_audio_on_mine
+        want_shot = self.config.capture_screenshot_on_mine
+
         if should_open_forge:
+            audio_clip = self._extract_audio_for_record(record)
+            shot_clip = record.screenshot_clip
+            include_audio_default = want_audio and (audio_clip is not None)
+
+            assoc_html = ""
+            assoc_preview = ""
+            if need_assoc:
+                assoc_tree = self.word_associations.build_tree(
+                    lemma=lemma,
+                    reading=reading,
+                    known_words=known_snap,
+                    current_sentence=record.raw_text,
+                    active_pack_id=pack_id_snap,
+                )
+                if not assoc_tree.is_empty():
+                    assoc_html = assoc_tree.to_anki_html()
+                    assoc_preview = assoc_tree.to_compact_preview_text()
+
             dlg = CardForgeDialog(
                 stage_mode=self.config.stage_mode,
                 sentence_highlighted=highlighted_sentence,
@@ -1533,7 +1605,7 @@ class MainWindow(QMainWindow):
                 audio_clip=audio_clip,
                 screenshot_clip=shot_clip,
                 include_audio_default=include_audio_default,
-                include_screenshot_default=self.config.capture_screenshot_on_mine or (shot_clip is not None),
+                include_screenshot_default=want_shot or (shot_clip is not None),
                 thread_pool=self.thread_pool,
                 capture_shot_fn=self.adapter.capture_screenshot_webp,
                 alt_lemmas=alt_lemmas,
@@ -1541,11 +1613,15 @@ class MainWindow(QMainWindow):
                 pack_translation=record.pack_translation,
                 related_words_html=assoc_html,
                 related_words_preview=assoc_preview,
+                theme_name=self.config.ui_theme,
                 parent=self if self.isVisible() else None,
             )
-            if not dlg.exec() or dlg.result_data is None:
-                return
-            forged: ForgedCardData = dlg.result_data
+            try:
+                if not dlg.exec() or dlg.result_data is None:
+                    return
+                forged: ForgedCardData = dlg.result_data
+            finally:
+                dlg.deleteLater()
             if forged.sentence_translation:
                 record.sentence_translation = forged.sentence_translation
             if forged.audio_clip:
@@ -1553,6 +1629,7 @@ class MainWindow(QMainWindow):
             if forged.screenshot_clip:
                 record.screenshot_clip = forged.screenshot_clip
         else:
+            # 預設直寫路徑：將音訊擷取與關聯記憶樹建構全部移入背景執行緒，絕不阻塞 UI！
             forged = ForgedCardData(
                 stage_mode=self.config.stage_mode,
                 sentence=highlighted_sentence,
@@ -1562,11 +1639,11 @@ class MainWindow(QMainWindow):
                 definition_bilingual=default_bi,
                 definition_monolingual=default_mono,
                 sentence_translation=record.sentence_translation or record.pack_translation,
-                include_audio=include_audio_default,
-                audio_clip=audio_clip if include_audio_default else None,
-                include_screenshot=self.config.capture_screenshot_on_mine,
-                screenshot_clip=shot_clip if self.config.capture_screenshot_on_mine else None,
-                related_words_html=assoc_html,
+                include_audio=want_audio,
+                audio_clip=record.audio_clip if want_audio else None,
+                include_screenshot=want_shot,
+                screenshot_clip=record.screenshot_clip if want_shot else None,
+                related_words_html="",
             )
 
         target_final = forged.target_word or lemma
@@ -1577,7 +1654,11 @@ class MainWindow(QMainWindow):
             self.anki.ensure_deck(self.config.deck_name)
             self.anki.ensure_note_type(self.config.note_type)
 
-            audio_bytes, audio_name = (forged.audio_clip if forged.audio_clip else (None, ""))
+            audio_clip_local = forged.audio_clip
+            if forged.include_audio and audio_clip_local is None:
+                audio_clip_local = self._extract_audio_for_record(record)
+            audio_bytes, audio_name = (audio_clip_local if audio_clip_local else (None, ""))
+
             screenshot_bytes, screenshot_name = (
                 forged.screenshot_clip if forged.screenshot_clip else (None, "")
             )
@@ -1585,6 +1666,21 @@ class MainWindow(QMainWindow):
                 shot = self.adapter.capture_screenshot_webp()
                 if shot:
                     screenshot_bytes, screenshot_name = shot
+
+            related_html_local = forged.related_words_html
+            if not should_open_forge and need_assoc and not related_html_local:
+                try:
+                    tree = self.word_associations.build_tree(
+                        lemma=target_final,
+                        reading=forged.target_reading,
+                        known_words=known_snap,
+                        current_sentence=record.raw_text,
+                        active_pack_id=pack_id_snap,
+                    )
+                    if not tree.is_empty():
+                        related_html_local = tree.to_anki_html()
+                except Exception:
+                    related_html_local = ""
 
             payload = AnkiCardPayload(
                 target_word=target_final,
@@ -1598,7 +1694,7 @@ class MainWindow(QMainWindow):
                 source_game=source_name,
                 stage_mode=forged.stage_mode,
                 ai_grammar_notes=grammar_html,
-                related_words_html=forged.related_words_html,
+                related_words_html=related_html_local,
                 audio_bytes=audio_bytes,
                 audio_filename=audio_name,
                 screenshot_bytes=screenshot_bytes,
@@ -1619,12 +1715,11 @@ class MainWindow(QMainWindow):
                 "has_shot": bool(screenshot_bytes),
             }
 
-        self.statusBar().showMessage(f"✨ 正在寫入精煉記憶卡「{target_final}」至 Anki...")
+        self.statusBar().showMessage(f"正在寫入記憶卡「{target_final}」至 Anki...")
         worker = FunctionWorker(_do_mine)
         worker.signals.finished.connect(self._on_mine_success)
         worker.signals.failed.connect(self._on_mine_failed)
-        self._active_workers.append(worker)
-        self.thread_pool.start(worker)
+        self._start_worker(worker)
 
     def _on_mine_success(self, res: dict) -> None:
         if self._closing:
@@ -1633,10 +1728,10 @@ class MainWindow(QMainWindow):
         lemma: str = res["lemma"]
         note_id: int = int(res.get("note_id") or 0)
         if note_id > 0:
-            self._last_mined_was_known[note_id] = bool(res.get("was_known_before", False))
-            if len(self._last_mined_was_known) > 30:
-                oldest = next(iter(self._last_mined_was_known))
-                self._last_mined_was_known.pop(oldest, None)
+            self._last_mined_meta[note_id] = (bool(res.get("was_known_before", False)), rec.record_id)
+            if len(self._last_mined_meta) > 30:
+                oldest = next(iter(self._last_mined_meta))
+                self._last_mined_meta.pop(oldest, None)
 
         badges: list[str] = []
         if res.get("has_audio"):
@@ -1664,22 +1759,30 @@ class MainWindow(QMainWindow):
         worker = FunctionWorker(_do_undo)
         worker.signals.finished.connect(self._on_undo_success)
         worker.signals.failed.connect(self._on_undo_failed)
-        self._active_workers.append(worker)
-        self.thread_pool.start(worker)
+        self._start_worker(worker)
 
     def _on_undo_success(self, res: dict) -> None:
         if self._closing:
             return
         note_id = int(res["note_id"])
         lemma = str(res["lemma"])
-        was_known = self._last_mined_was_known.pop(note_id, False)
-        if not was_known:
-            self.store.known_words.discard(lemma)
-        self.store.today_mined_count = max(0, self.store.today_mined_count - 1)
+        was_known, rec_id = self._last_mined_meta.pop(note_id, (False, -1))
+        rec = self.store.get_by_id(rec_id)
+        if rec is not None:
+            self.store.unmark_mined(rec, lemma)
+            if was_known:
+                self.store.known_words.add(lemma)
+        else:
+            if not was_known:
+                self.store.known_words.discard(lemma)
+            self.store.today_mined_count = max(0, self.store.today_mined_count - 1)
         self._update_budget_pill()
+        self._refresh_history_list(
+            select_record_id=self._current_record.record_id if self._current_record else None
+        )
         if self._current_record is not None:
             self._retokenize_current()
-        msg = f"↩ 已撤銷「{lemma}」"
+        msg = f"已撤銷「{lemma}」"
         self.statusBar().showMessage(msg, 4000)
         self.undo_toast.show_info(msg, duration_ms=2600)
 
@@ -1725,8 +1828,7 @@ class MainWindow(QMainWindow):
         worker = FunctionWorker(_do_mine)
         worker.signals.finished.connect(self._on_grammar_mine_success)
         worker.signals.failed.connect(self._on_mine_failed)
-        self._active_workers.append(worker)
-        self.thread_pool.start(worker)
+        self._start_worker(worker)
 
     def _on_grammar_mine_success(self, res: dict) -> None:
         self.store.today_mined_count += 1
@@ -1798,7 +1900,10 @@ class MainWindow(QMainWindow):
             parent=self,
         )
         dlg.target_attached.connect(self._on_hook_target_attached)
-        dlg.exec()
+        try:
+            dlg.exec()
+        finally:
+            dlg.deleteLater()
 
     def _on_hook_target_attached(self, target: HookTargetProcess) -> None:
         self.config.current_game_name = target.name
@@ -1809,7 +1914,7 @@ class MainWindow(QMainWindow):
         if matched is not None:
             self.config.active_voice_pack_id = matched.pack_id
             self.statusBar().showMessage(
-                f"✨ 已自動配對純淨人聲包《{matched.game_name}》（{matched.voiced_line_count} 句 · 0% BGM）",
+                f"已自動配對純淨人聲包《{matched.game_name}》（{matched.voiced_line_count} 句 · 0% BGM）",
                 6000,
             )
         self.config.save()
@@ -1826,13 +1931,12 @@ class MainWindow(QMainWindow):
         worker.signals.failed.connect(
             lambda err: self.statusBar().showMessage(f"偵測掛載失敗：{err}", 5000)
         )
-        self._active_workers.append(worker)
-        self.thread_pool.start(worker)
+        self._start_worker(worker)
 
     def _on_detect_and_attach_done(self, targets: list[HookTargetProcess]) -> None:
         if not targets:
             self.statusBar().showMessage(
-                "未偵測到執行中遊戲，可從「🎮 遊戲/影片」啟動生肉、連接 mpv 影片或使用「📷 OCR」。",
+                "未偵測到執行中遊戲，可從「來源」啟動生肉或連接 mpv 影片。",
                 5500,
             )
             return
@@ -1917,8 +2021,7 @@ class MainWindow(QMainWindow):
         worker.signals.failed.connect(
             lambda err: self.statusBar().showMessage(f"⚠ 自動 Hook 失敗：{err}", 6000)
         )
-        self._active_workers.append(worker)
-        self.thread_pool.start(worker)
+        self._start_worker(worker)
 
     def _on_auto_attach_ready(self, target: HookTargetProcess | None) -> None:
         if target is None:
@@ -1967,39 +2070,257 @@ class MainWindow(QMainWindow):
         self.overlay.popup.hide()
         self.open_learning_blueprint(lesson=lesson)
 
-    def _open_current_map(self):
+    def _open_grammar_blueprint(self, pattern_id: str = "") -> None:
+        if pattern_id:
+            self.open_learning_blueprint(pattern_id=pattern_id)
+        else:
+            self.open_learning_blueprint(open_tab="grammar")
+
+    def _open_current_map(self) -> None:
         link = self.lookup_panel.study_link
         record = self._current_record
-        if self._selected_token and record and link.sentence == record.raw_text:
+        if self._selected_token and record and link.focus is not None and link.sentence == record.raw_text:
             self._open_study_focus(link.focus, link.sentence, link.lemma)
         else:
             self.open_learning_blueprint()
 
-    def _open_study_focus(self, focus, sentence, lemma):
+    def _open_study_focus(self, focus, sentence: str, lemma: str) -> None:
         self.overlay.popup.hide()
         self.open_learning_blueprint(study=(focus, sentence, lemma))
 
-    def open_learning_blueprint(self, pattern_id: str = "", lesson: VerbLesson | None = None, study=None) -> None:
-        dlg = LearningBlueprintDialog(
-            grammar=self.grammar_engine,
-            progress_store=self.progress_store,
-            known_words_count=len(self.store.known_words),
-            stage_mode=self.config.stage_mode,
-            theme_name=self.config.ui_theme,
-            parent=self if self.isVisible() or not self.overlay.isVisible() else self.overlay,
+    def _open_study_workbench(self, focus, sentence: str, lemma: str, token, tokens) -> None:
+        self.overlay.popup.hide()
+        self.open_learning_blueprint(study=(focus, sentence, lemma, token, tokens))
+
+    def _enqueue_study_sentence(self, sentence: str, surface: str, lemma: str) -> None:
+        if not sentence:
+            return
+        self.progress_store.enqueue_study_sentence(sentence, surface, lemma)
+        if self._blueprint_dialog is not None:
+            self._blueprint_dialog.study_map.refresh_queue()
+        label = surface or lemma or sentence[:12]
+        self.statusBar().showMessage(f"已加入待拆解難句隊列：{label}", 4000)
+        if self.overlay.isVisible():
+            self.overlay.show_toast(f"已加入待拆解隊列：{label}", 2400)
+
+    def _ensure_blueprint_dialog(self) -> LearningBlueprintDialog:
+        if self._blueprint_dialog is None:
+            dlg = LearningBlueprintDialog(
+                grammar=self.grammar_engine,
+                progress_store=self.progress_store,
+                known_words_count=len(self.store.known_words),
+                stage_mode=self.config.stage_mode,
+                theme_name=self.config.ui_theme,
+                parent=None,
+            )
+            dlg.mine_grammar_requested.connect(self._mine_grammar_card)
+            dlg.audio_preview_requested.connect(self._preview_audio_for_sentence)
+            dlg.mine_sentence_requested.connect(self._mine_from_workbench)
+            dlg.queue_sentence_selected.connect(self._open_queued_sentence_in_workbench)
+            dlg.destroyed.connect(lambda: setattr(self, "_blueprint_dialog", None))
+            self._blueprint_dialog = dlg
+        else:
+            self._blueprint_dialog.theme_name = self.config.ui_theme
+            self._blueprint_dialog.refresh_progress(
+                known_words_count=len(self.store.known_words),
+                stage_mode=self.config.stage_mode,
+            )
+        return self._blueprint_dialog
+
+    def _preview_audio_for_sentence(self, sentence: str) -> None:
+        if not sentence:
+            return
+        if self._current_record is not None and self._current_record.raw_text == sentence:
+            self._preview_current_audio()
+            return
+        rec = next((r for r in self.store.all_records() if r.raw_text == sentence), None)
+        if rec is not None:
+            self.statusBar().showMessage("正在擷取例句原聲語音...")
+            worker = FunctionWorker(self._extract_audio_for_record, rec)
+            worker.signals.finished.connect(lambda clip, r=rec: self._on_audio_preview_ready(clip, r))
+            worker.signals.failed.connect(lambda err: self.preview_failed.emit(f"語音試聽失敗：{err}"))
+            self._start_worker(worker)
+            return
+        pack_id = self._resolve_voice_pack_id()
+        if not pack_id:
+            self.statusBar().showMessage("目前歷史紀錄中找不到此句原聲。", 3500)
+            return
+
+        def _lookup_voice() -> tuple[bytes, str] | None:
+            res = self.voice_packs.match_and_extract_voice(
+                text=sentence,
+                pack_id=pack_id,
+                game_name=self.config.current_game_name,
+                exe_path=self._current_game_exe_path(),
+            )
+            return res.audio_clip if res.has_voice else None
+
+        worker = FunctionWorker(_lookup_voice)
+        worker.signals.finished.connect(
+            lambda clip: play_mp3_bytes_async(clip[0], self.preview_failed.emit)
+            if clip
+            else self.statusBar().showMessage("人聲包中找不到此句配音。", 3500)
         )
+        worker.signals.failed.connect(lambda err: self.preview_failed.emit(f"語音試聽失敗：{err}"))
+        self._start_worker(worker)
+
+    def _mine_from_workbench(self, sentence: str, lemma: str) -> None:
+        if not sentence:
+            return
+        rec = next((r for r in self.store.all_records() if r.raw_text == sentence), None)
+        if rec is None:
+            tokenized = self.tokenizer.tokenize(sentence, self.store.known_words)
+            analysis = self.grammar_engine.analyze(tokenized)
+            rec = SentenceRecord(
+                record_id=-1,
+                raw_text=sentence,
+                tokenized=tokenized,
+                timestamp=time.time(),
+                source="workbench",
+                media_title=self.config.current_game_name or "邏輯拆解工作台",
+                grammar_analysis=analysis,
+            )
+        tok = None
+        if lemma:
+            tok = next(
+                (t for t in rec.tokenized.tokens if t.lemma == lemma or t.surface == lemma),
+                None,
+            )
+        if tok is None:
+            tok = next((t for t in rec.tokenized.tokens if t.is_content_word), None)
+        if tok is None and rec.tokenized.tokens:
+            tok = rec.tokenized.tokens[0]
+        if tok is not None:
+            self._mine_record_token(rec, tok)
+
+    def _open_queued_sentence_in_workbench(self, sentence: str, focus_surface: str) -> None:
+        if not sentence:
+            return
+        tokenized = self.tokenizer.tokenize(sentence, self.store.known_words)
+        analysis = self.grammar_engine.analyze(tokenized)
+        tok = None
+        if focus_surface:
+            tok = next(
+                (t for t in tokenized.tokens if t.surface == focus_surface or t.lemma == focus_surface),
+                None,
+            )
+        if tok is None:
+            tok = next((t for t in tokenized.tokens if t.is_content_word and not t.is_known), None)
+        if tok is None:
+            tok = next((t for t in tokenized.tokens if t.is_content_word), None)
+        if tok is None and tokenized.tokens:
+            tok = tokenized.tokens[0]
+        if tok is None:
+            return
+        phrase_tok = None
+        pm = find_phrase_for_token(sentence, tokenized.tokens, tok, self.dictionary)
+        if pm is not None:
+            phrase_tok = build_phrase_token(pm)
+        active_tok = phrase_tok if phrase_tok is not None else tok
+        particle_info = None if phrase_tok is not None else self.grammar_engine.get_particle_info(tok.surface)
+        focus = focus_for(
+            active_tok,
+            tokens=tokenized.tokens,
+            phrase=(phrase_tok is not None),
+            particle=particle_info,
+            sentence=sentence,
+        )
+        dlg = self._ensure_blueprint_dialog()
+        dlg.tabs.setCurrentWidget(dlg.study_map)
+        dlg.study_map.show_focus(
+            focus,
+            sentence,
+            active_tok.lemma,
+            token=active_tok,
+            tokens=tokenized.tokens,
+            analysis=analysis,
+        )
+
+    def open_learning_blueprint(
+        self,
+        pattern_id: str = "",
+        lesson: VerbLesson | None = None,
+        study=None,
+        *,
+        open_tab: str = "",
+    ) -> None:
+        dlg = self._ensure_blueprint_dialog()
         if study:
-            dlg.study_map.show_focus(*study)
+            focus, sent, lemma = study[:3]
+            tok = study[3] if len(study) > 3 else None
+            toks = study[4] if len(study) > 4 else ()
+            analysis = study[5] if len(study) > 5 else None
+            if self._current_record is not None and self._current_record.raw_text == sent:
+                if analysis is None:
+                    analysis = self._current_record.grammar_analysis
+                if not toks:
+                    toks = self._current_record.tokenized.tokens
+                if tok is None:
+                    tok = self._selected_token
+            dlg.tabs.setCurrentWidget(dlg.study_map)
+            dlg.study_map.show_focus(focus, sent, lemma, token=tok, tokens=toks, analysis=analysis)
         elif lesson is not None:
-            dlg.verb_explorer.select_lesson(lesson)
-            dlg.tabs.setCurrentWidget(dlg.verb_explorer)
+            sent = self._current_record.raw_text if self._current_record else lesson.surface
+            tok = (
+                self._selected_token
+                if (self._selected_token is not None and self._selected_token.lemma == lesson.lemma)
+                else Token(lesson.surface, lesson.lemma, "", 0, len(lesson.surface), verb_type=lesson.group)
+            )
+            toks = self._current_record.tokenized.tokens if self._current_record else (tok,)
+            analysis = self._current_record.grammar_analysis if self._current_record else None
+            focus = focus_for(tok, tokens=toks, sentence=sent)
+            dlg.tabs.setCurrentWidget(dlg.study_map)
+            dlg.study_map.show_focus(focus, sent, lesson.lemma, token=tok, tokens=toks, analysis=analysis)
         elif isinstance(pattern_id, str) and pattern_id:
             dlg.select_pattern(pattern_id)
-        else:
+        elif open_tab == "grammar":
+            dlg.tabs.setCurrentWidget(dlg.grammar_tab)
+        elif open_tab == "reference":
             dlg.tabs.setCurrentWidget(dlg.reference)
             dlg.reference.search.setFocus()
-        dlg.mine_grammar_requested.connect(self._mine_grammar_card)
-        dlg.exec()
+        else:
+            dlg.tabs.setCurrentWidget(dlg.study_map)
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+
+    # === 外置 Okular 閱讀伴讀（純剪貼簿文字＋DBus 自動標記書名頁碼） ===
+    def _sync_okular_watch_state(self) -> None:
+        if self.config.clipboard_watch or self.config.okular_companion_enabled:
+            self.ingestion.start_clipboard_watch()
+        else:
+            self.ingestion.stop_clipboard_watch()
+
+        if hasattr(self, "act_okular_mode"):
+            self.act_okular_mode.blockSignals(True)
+            self.act_okular_mode.setChecked(self.config.okular_companion_enabled)
+            self.act_okular_mode.blockSignals(False)
+        self._rebuild_tray_menu()
+
+    def _toggle_okular_companion(self, checked: bool) -> None:
+        enabled = bool(checked)
+        self.config.okular_companion_enabled = enabled
+        if enabled:
+            self.config.clipboard_watch = True
+        self.config.save()
+        self._sync_okular_watch_state()
+
+        if enabled:
+            ctx = query_okular_context(timeout=0.4)
+            if ctx is not None and ctx.label:
+                short = ctx.label[:24] + ("…" if len(ctx.label) > 24 else "")
+                self.game_badge.setText(short)
+                self.game_badge.setObjectName("PillOk")
+                self.game_badge.style().unpolish(self.game_badge)
+                self.game_badge.style().polish(self.game_badge)
+                msg = f"已開啟 Okular 伴讀（《{ctx.title}》）：選取日文按 Ctrl+C 即可查詞與製卡"
+            else:
+                msg = "已開啟 Okular 伴讀：在 Okular 選取日文按 Ctrl+C 即可自動查詞與製卡"
+            self.statusBar().showMessage(msg, 6000)
+            if self.overlay.isVisible():
+                self.overlay.show_toast("已開啟 Okular 伴讀（剪貼簿）")
+        else:
+            self.statusBar().showMessage("已關閉 Okular 伴讀", 4000)
 
     def open_media_bridge(self) -> None:
         dlg = MediaBridgeDialog(
@@ -2009,7 +2330,10 @@ class MainWindow(QMainWindow):
         )
         dlg.mpv_launched.connect(lambda: self._toggle_overlay(True) if not self.overlay.isVisible() else None)
         dlg.immersion_settings_changed.connect(self._sync_mpv_immersion_buttons)
-        dlg.exec()
+        try:
+            dlg.exec()
+        finally:
+            dlg.deleteLater()
 
     def _sync_mpv_immersion_buttons(self) -> None:
         self.mpv_speed_btn.blockSignals(True)
@@ -2025,7 +2349,10 @@ class MainWindow(QMainWindow):
             parent=self,
         )
         dlg.packs_changed.connect(self._on_voice_packs_changed)
-        dlg.exec()
+        try:
+            dlg.exec()
+        finally:
+            dlg.deleteLater()
 
     def open_sentence_bank(self) -> None:
         dlg = SentenceBankDialog(
@@ -2038,7 +2365,10 @@ class MainWindow(QMainWindow):
         )
         dlg.mine_item_requested.connect(self._mine_sentence_bank_item)
         dlg.mark_known_requested.connect(self._mark_bank_word_known)
-        dlg.exec()
+        try:
+            dlg.exec()
+        finally:
+            dlg.deleteLater()
 
     def _mark_bank_word_known(self, lemma: str) -> None:
         if lemma:
@@ -2080,7 +2410,7 @@ class MainWindow(QMainWindow):
             if packs:
                 pk = packs[0]
                 self.statusBar().showMessage(
-                    f"📦 已啟用純淨人聲索引《{pk.game_name}》（{pk.voiced_line_count} 句有聲台詞 · 0% BGM）",
+                    f"已啟用純淨人聲索引《{pk.game_name}》（{pk.voiced_line_count} 句有聲台詞 · 0% BGM）",
                     5500,
                 )
 
@@ -2095,25 +2425,40 @@ class MainWindow(QMainWindow):
         )
         dlg.anki_initialized.connect(lambda r: self._background_sync_anki() if r.connected else None)
         dlg.dictionary_updated.connect(self._retokenize_current)
-        dlg.exec()
+        try:
+            dlg.exec()
+        finally:
+            dlg.deleteLater()
         self.config.first_run_completed = True
         self.config.save()
 
     def open_dictionary_manager(self) -> None:
         dlg = DictionaryManagerDialog(self.dictionary, self.thread_pool, self)
         dlg.dictionary_updated.connect(self._retokenize_current)
-        dlg.exec()
+        try:
+            dlg.exec()
+        finally:
+            dlg.deleteLater()
 
     def open_difficulty_guide(self) -> None:
         dlg = DifficultyGuideDialog(theme_name=self.config.ui_theme, parent=self)
-        dlg.exec()
+        try:
+            dlg.exec()
+        finally:
+            dlg.deleteLater()
 
     def open_settings(self) -> None:
         prev_theme = self.config.ui_theme
         prev_size = (self.config.overlay_width, self.config.overlay_height)
         prev_align = self.config.overlay_text_align
+        prev_blind = self.config.overlay_blind_listen
         dlg = SettingsDialog(self.config, self.thread_pool, self)
-        if dlg.exec():
+        try:
+            accepted = bool(dlg.exec())
+        finally:
+            dlg.deleteLater()
+        if accepted:
+            self.anki.close()
             self.anki = AnkiConnectClient(self.config.anki_url)
             self.ingestion.dedup_repeated = self.config.dedup_repeated_chars
             self.hook_manager.dedup_repeated = self.config.dedup_repeated_chars
@@ -2122,10 +2467,7 @@ class MainWindow(QMainWindow):
                 self.ingestion.start_websocket(self.config.ws_host, self.config.ws_port)
             else:
                 self.ingestion.stop_websocket()
-            if self.config.clipboard_watch:
-                self.ingestion.start_clipboard_watch()
-            else:
-                self.ingestion.stop_clipboard_watch()
+            self._sync_okular_watch_state()
             if self.config.ui_theme != prev_theme:
                 self._apply_theme(self.config.ui_theme, save=False)
             if (self.config.overlay_width, self.config.overlay_height) != prev_size:
@@ -2136,6 +2478,8 @@ class MainWindow(QMainWindow):
                 )
             if self.config.overlay_text_align != prev_align:
                 self.overlay.set_text_align(self.config.overlay_text_align, save=False)
+            if self.config.overlay_blind_listen != prev_blind:
+                self.overlay._toggle_blind_listen(self.config.overlay_blind_listen)
             self._apply_stage_ui()
             self._update_budget_pill()
             self._background_sync_anki()
@@ -2150,6 +2494,8 @@ class MainWindow(QMainWindow):
             self._current_record.tokenized
         )
         self._display_record(self._current_record)
+        if self.overlay.isVisible():
+            self.overlay.show_record(self._current_record)
 
     def closeEvent(self, event) -> None:  # noqa: N802
         if self._tray_available and self.config.start_in_tray_overlay and not self._force_quit:
@@ -2157,6 +2503,11 @@ class MainWindow(QMainWindow):
             self.hide()
             return
         self._closing = True
+        if self._blueprint_dialog is not None:
+            self._blueprint_dialog.close()
+            self._blueprint_dialog.deleteLater()
+            self._blueprint_dialog = None
+        stop_active_audio_preview()
         self.hook_manager.detach()
         self.mpv_bridge.stop()
         self.undo_toast.close()
@@ -2165,6 +2516,8 @@ class MainWindow(QMainWindow):
         if self.tray_icon is not None:
             self.tray_icon.hide()
         self.ingestion.shutdown()
+        self.thread_pool.waitForDone(3000)
+        self.anki.close()
         self.voice_packs.close()
         self.progress_store.close()
         self.dictionary.close()

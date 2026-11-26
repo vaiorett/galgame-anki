@@ -164,7 +164,7 @@ class PitchGraphWidget(QWidget):
 
             bf = QFont("Noto Sans CJK JP")
             bf.setPointSizeF(badge_pt)
-            bf.setBold(True)
+            bf.setWeight(QFont.Weight.Medium)
             painter.setFont(bf)
             painter.setPen(accent_color)
             painter.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, info.badge_text())

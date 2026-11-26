@@ -45,7 +45,21 @@ class SentenceStore:
         self._records: deque[SentenceRecord] = deque(maxlen=max_history)
         self._next_id: int = 1
         self.known_words: set[str] = set()
-        self.today_mined_count: int = 0
+        self._today_date: str = time.strftime("%Y-%m-%d")
+        self._today_mined_count: int = 0
+
+    @property
+    def today_mined_count(self) -> int:
+        cur_day = time.strftime("%Y-%m-%d")
+        if cur_day != self._today_date:
+            self._today_date = cur_day
+            self._today_mined_count = 0
+        return self._today_mined_count
+
+    @today_mined_count.setter
+    def today_mined_count(self, value: int) -> None:
+        self._today_date = time.strftime("%Y-%m-%d")
+        self._today_mined_count = max(0, int(value))
 
     def add(
         self,
@@ -103,6 +117,7 @@ class SentenceStore:
         latest.raw_text = tokenized.raw
         latest.tokenized = tokenized
         latest.grammar_analysis = grammar_analysis
+        latest.end_timestamp = None
         latest.audio_clip = None  # 內容變長，下次製卡/試聽重新配對或切完整音訊
         latest.audio_source = ""
         return latest
@@ -148,8 +163,15 @@ class SentenceStore:
             cur.sub_end = prev.sub_end
         if not cur.video_path and prev.video_path:
             cur.video_path = prev.video_path
+        if not cur.media_title and prev.media_title:
+            cur.media_title = prev.media_title
+        if not cur.external_audio_path and prev.external_audio_path:
+            cur.external_audio_path = prev.external_audio_path
+        if cur.audio_stream_index is None and prev.audio_stream_index is not None:
+            cur.audio_stream_index = prev.audio_stream_index
         if cur.screenshot_clip is None and prev.screenshot_clip is not None:
             cur.screenshot_clip = prev.screenshot_clip
+        cur.mined_words |= prev.mined_words
         cur.audio_clip = None
         cur.audio_source = ""
         cur.sentence_translation = ""
@@ -174,7 +196,14 @@ class SentenceStore:
     def mark_mined(self, record: SentenceRecord, lemma: str) -> None:
         record.mined_words.add(lemma)
         self.known_words.add(lemma)
-        self.today_mined_count += 1
+        self.today_mined_count = self.today_mined_count + 1
+
+    def unmark_mined(self, record: SentenceRecord, lemma: str) -> None:
+        """撤銷製卡時同步回退當句標記與今日計數。"""
+        record.mined_words.discard(lemma)
+        self.known_words.discard(lemma)
+        if self.today_mined_count > 0:
+            self.today_mined_count = self.today_mined_count - 1
 
 
 def load_difficulty_guide() -> dict[str, Any]:

@@ -58,7 +58,7 @@ CARD_CSS = """
 }
 
 .sentence-box .focus-word {
-  font-weight: 700;
+  font-weight: 500;
   text-decoration: underline;
   text-underline-offset: 5px;
   text-decoration-thickness: 2px;
@@ -106,7 +106,7 @@ ruby rt {
 /* Lv.1 破冰超大讀音焦點 */
 .lv1-reading-hero {
   font-size: 32px;
-  font-weight: 700;
+  font-weight: 500;
   letter-spacing: 0.04em;
   margin: 4px 0 6px 0;
 }
@@ -121,7 +121,7 @@ ruby rt {
 
 .target-word {
   font-size: 27px;
-  font-weight: 700;
+  font-weight: 500;
 }
 
 .target-reading {
@@ -163,7 +163,7 @@ ruby rt {
 
 .pitch-chip-tag {
   font-size: 11.5px;
-  font-weight: 700;
+  font-weight: 500;
   padding: 1px 6px;
   border-radius: 5px;
   border: 1px solid currentColor;
@@ -214,7 +214,7 @@ ruby rt {
 
 .meaning-label {
   font-size: 12px;
-  font-weight: 600;
+  font-weight: 500;
   opacity: 0.6;
   margin-bottom: 3px;
 }
@@ -240,7 +240,7 @@ details.fold-box {
 
 details.fold-box summary {
   cursor: pointer;
-  font-weight: 600;
+  font-weight: 500;
   opacity: 0.78;
   outline: none;
 }
@@ -257,7 +257,7 @@ details.fold-box summary {
 
 .rel-title {
   font-size: 12.5px;
-  font-weight: 700;
+  font-weight: 500;
   opacity: 0.72;
   margin-bottom: 3px;
 }

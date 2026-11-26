@@ -52,7 +52,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--window",
         action="store_true",
-        help="啟動時直接開啟主控制台視窗（預設收進系統匣、只顯示字幕覆蓋層）",
+        help="啟動時直接開啟主控制台視窗（預設即開啟主視窗，覆蓋層需手動開啟）",
     )
     args = parser.parse_args(argv)
     config = AppConfig.load()

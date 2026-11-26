@@ -15,6 +15,7 @@ import csv
 import io
 import os
 import re
+import shlex
 import shutil
 import struct
 import subprocess
@@ -320,16 +321,49 @@ def _build_wine_env(wine_prefix: str = "", locale: str = "ja_JP.UTF-8") -> dict[
     return env
 
 
+def _split_wine_command(wine_command: str) -> list[str]:
+    raw = (wine_command or "").strip()
+    if raw:
+        try:
+            parts = shlex.split(raw)
+            if parts:
+                return parts
+        except ValueError:
+            return [raw]
+    return [shutil.which("wine") or "wine"]
+
+
+def _resolve_wine_exe_path(exe_arg: str, wine_prefix: str = "") -> str:
+    """將 Wine 命令列中的 Linux 路徑、Z:\\ 路徑或 C:\\ 路徑解析為實際 Linux 執行檔以偵測 PE 架構。"""
+    if not exe_arg:
+        return ""
+    if Path(exe_arg).exists():
+        return exe_arg
+    low = exe_arg.lower()
+    if low.startswith("z:"):
+        converted = exe_arg[2:].replace("\\", "/")
+        if Path(converted).exists():
+            return converted
+    elif len(exe_arg) >= 3 and exe_arg[1] == ":" and exe_arg[2] in ("\\", "/"):
+        drive = exe_arg[0].lower()
+        rel = exe_arg[3:].replace("\\", "/")
+        prefix_root = Path(wine_prefix) if wine_prefix else (Path.home() / ".wine")
+        cand = prefix_root / ("drive_c" if drive == "c" else f"dosdevices/{drive}:") / rel
+        if cand.exists():
+            return str(cand)
+    return ""
+
+
 def list_wine_tasklist(
     wine_command: str = "wine",
     wine_prefix: str = "",
 ) -> list[tuple[str, int]]:
     """在指定 WINEPREFIX 執行 `wine tasklist /FO CSV /NH`，回傳 (exe_name, windows_pid) 清單。"""
-    wine_bin = wine_command.strip() or shutil.which("wine") or "wine"
+    wine_parts = _split_wine_command(wine_command)
     env = _build_wine_env(wine_prefix=wine_prefix)
     try:
         res = subprocess.run(
-            [wine_bin, "tasklist", "/FO", "CSV", "/NH"],
+            [*wine_parts, "tasklist", "/FO", "CSV", "/NH"],
             env=env,
             capture_output=True,
             timeout=10,
@@ -341,7 +375,10 @@ def list_wine_tasklist(
     if res.returncode != 0 or not res.stdout:
         return []
 
-    text = res.stdout.decode("utf-8", errors="ignore")
+    try:
+        text = res.stdout.decode("utf-8")
+    except UnicodeDecodeError:
+        text = res.stdout.decode("cp932", errors="replace")
     results: list[tuple[str, int]] = []
     for row in csv.reader(io.StringIO(text)):
         if len(row) < 2:
@@ -370,12 +407,15 @@ def discover_wine_game_targets(
             env = info.get("environ") or {}
 
             exe_arg = ""
-            if name.lower().endswith(".exe"):
-                exe_arg = name
+            # 跳過 explorer.exe /desktop=... 等系統包裝參數，優先取真正的遊戲 .exe
             for arg in cmdline:
                 if arg.lower().endswith(".exe"):
-                    exe_arg = arg
-                    break
+                    cand_base = Path(arg.replace("\\", "/")).name.lower()
+                    if cand_base not in _WINE_SYSTEM_EXES:
+                        exe_arg = arg
+                        break
+            if not exe_arg and name.lower().endswith(".exe") and name.lower() not in _WINE_SYSTEM_EXES:
+                exe_arg = name
             if not exe_arg:
                 continue
 
@@ -384,14 +424,7 @@ def discover_wine_game_targets(
                 continue
 
             prefix = str(env.get("WINEPREFIX") or "")
-            # 嘗試從 cmdline 找出實際 Linux 檔案路徑以判別 32/64 位元
-            linux_exe_path = ""
-            if Path(exe_arg).exists():
-                linux_exe_path = exe_arg
-            elif exe_arg.lower().startswith("z:"):
-                converted = exe_arg[2:].replace("\\", "/")
-                if Path(converted).exists():
-                    linux_exe_path = converted
+            linux_exe_path = _resolve_wine_exe_path(exe_arg, prefix)
 
             seen_prefixes.setdefault(prefix, []).append(
                 {
@@ -403,9 +436,9 @@ def discover_wine_game_targets(
     except Exception:
         pass
 
-    # 若沒從 psutil 發現特別前綴，也檢查預設 Wine Prefix
+    # 若系統目前沒有執行任何 Wine 遊戲，不主動啟動預設 ~/.wine 服務器
     if not seen_prefixes:
-        seen_prefixes[""] = []
+        return []
 
     for prefix, proc_infos in seen_prefixes.items():
         win_procs = list_wine_tasklist(wine_command=default_wine_command, wine_prefix=prefix)
@@ -443,8 +476,8 @@ class GameHookManager(QObject):
     hook_state_changed = Signal(bool, str)     # (is_attached, status_label)
 
     # 跨執行緒橋接用內部訊號
-    _raw_event_signal = Signal(object)         # HookLineEvent
-    _process_exited_signal = Signal(int)
+    _raw_event_signal = Signal(object, int)    # (HookLineEvent, generation)
+    _process_exited_signal = Signal(int, int)  # (returncode, generation)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -452,6 +485,7 @@ class GameHookManager(QObject):
         self._reader_thread: threading.Thread | None = None
         self._attached_target: HookTargetProcess | None = None
         self._stop_flag = threading.Event()
+        self._generation: int = 0
 
         self._threads: dict[str, HookThreadInfo] = {}
         self._selected_thread_key: str = "auto"  # "auto" 或指定 thread_key
@@ -501,10 +535,11 @@ class GameHookManager(QObject):
             cmd = [str(cli_path)]
             env = os.environ.copy()
         else:
-            wine_bin = target.wine_command.strip() or shutil.which("wine") or "wine"
-            cmd = [wine_bin, str(cli_path)]
+            cmd = [*_split_wine_command(target.wine_command), str(cli_path)]
             env = _build_wine_env(wine_prefix=target.wine_prefix)
 
+        self._generation += 1
+        cur_gen = self._generation
         self._stop_flag.clear()
         self._threads.clear()
         self._pending_buffers.clear()
@@ -523,7 +558,7 @@ class GameHookManager(QObject):
 
         self._reader_thread = threading.Thread(
             target=self._read_stdout_loop,
-            args=(self._proc,),
+            args=(self._proc, cur_gen),
             daemon=True,
         )
         self._reader_thread.start()
@@ -533,14 +568,17 @@ class GameHookManager(QObject):
         self.console_logged.emit(
             f"[GalAnki] 已啟動 {target.arch} TextractorCLI 並注入 {target.exe_name} (WinPID={target.win_pid})"
         )
-        self.hook_state_changed.emit(True, f"🪝 已掛載：{target.name} ({target.arch})")
+        self.hook_state_changed.emit(True, f"已掛載：{target.name} ({target.arch})")
 
     def send_command(self, command: str) -> bool:
         """向執行中的 TextractorCLI 發送指令（如 attach / detach / 自訂 H-Code）。"""
         if self._proc is None or self._proc.poll() is not None or self._proc.stdin is None:
             return False
         try:
-            payload = (command.strip() + "\r\n").encode("utf-16le")
+            clean_cmd = command.replace("\r", " ").replace("\n", " ").strip()
+            if not clean_cmd:
+                return False
+            payload = (clean_cmd + "\r\n").encode("utf-16le")
             self._proc.stdin.write(payload)
             self._proc.stdin.flush()
             return True
@@ -549,7 +587,7 @@ class GameHookManager(QObject):
 
     def inject_hook_code(self, hook_code: str) -> bool:
         """向目前掛載的遊戲注入使用者提供的特殊碼（H-Code）。"""
-        code = hook_code.strip()
+        code = hook_code.replace("\r", "").replace("\n", "").strip()
         if not code or self._attached_target is None:
             return False
         cmd = f"{code} -P{self._attached_target.win_pid}"
@@ -569,11 +607,11 @@ class GameHookManager(QObject):
         if os.name == "nt":
             subprocess.Popen([str(gui_path)], cwd=str(gui_path.parent))
         else:
-            wine_bin = (tgt.wine_command if tgt else "") or shutil.which("wine") or "wine"
+            wine_parts = _split_wine_command(tgt.wine_command if tgt else "")
             prefix = tgt.wine_prefix if tgt else ""
             env = _build_wine_env(wine_prefix=prefix)
             subprocess.Popen(
-                [wine_bin, str(gui_path)],
+                [*wine_parts, str(gui_path)],
                 cwd=str(gui_path.parent),
                 env=env,
                 stdout=subprocess.DEVNULL,
@@ -582,6 +620,7 @@ class GameHookManager(QObject):
             )
 
     def detach(self) -> None:
+        self._generation += 1
         self._stop_flag.set()
         for timer in list(self._flush_timers.values()):
             timer.stop()
@@ -589,37 +628,60 @@ class GameHookManager(QObject):
         self._flush_timers.clear()
         self._pending_buffers.clear()
 
-        if self._proc is not None:
-            if self._attached_target is not None:
-                self.send_command(f"detach -P{self._attached_target.win_pid}")
+        proc = self._proc
+        self._proc = None
+        if proc is not None:
+            if self._attached_target is not None and proc.poll() is None and proc.stdin is not None:
+                try:
+                    payload = f"detach -P{self._attached_target.win_pid}\r\n".encode("utf-16le")
+                    proc.stdin.write(payload)
+                    proc.stdin.flush()
+                except OSError:
+                    pass
             try:
-                if self._proc.stdin:
-                    self._proc.stdin.close()
+                if proc.stdin:
+                    proc.stdin.close()
             except OSError:
                 pass
             try:
-                self._proc.kill()
+                proc.wait(timeout=0.35)
+            except subprocess.TimeoutExpired:
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=0.5)
+                except (OSError, subprocess.TimeoutExpired):
+                    try:
+                        proc.kill()
+                        proc.wait(timeout=1.0)
+                    except (OSError, subprocess.TimeoutExpired):
+                        pass
+            try:
+                if proc.stdout:
+                    proc.stdout.close()
             except OSError:
                 pass
-            self._proc = None
 
         was_attached = self._attached_target is not None
         self._attached_target = None
         if was_attached:
             self.hook_state_changed.emit(False, "未掛載遊戲")
 
-    def _read_stdout_loop(self, proc: subprocess.Popen) -> None:
+    def _read_stdout_loop(self, proc: subprocess.Popen, generation: int) -> None:
         """在背景執行緒安全讀取 UTF-16LE 位元組串流，嚴格以 b'\\n\\x00' 切行避免錯位。"""
         assert proc.stdout is not None
         buf = b""
-        while not self._stop_flag.is_set():
+        while not self._stop_flag.is_set() and generation == self._generation:
             try:
                 chunk = proc.stdout.read1(4096) if hasattr(proc.stdout, "read1") else proc.stdout.read(1024)
-            except OSError:
+            except (OSError, ValueError):
                 break
             if not chunk:
                 break
             buf += chunk
+            # 防止 UTF-16LE 錯位或超長雜訊讓緩衝區無限膨脹
+            if len(buf) > 131072:
+                nl = buf.rfind(b"\n\x00")
+                buf = buf[nl + 2 :] if nl >= 0 else buf[-2048:]
 
             # 以偶數位元組邊界尋找 UTF-16LE 換行符 (0x0A 0x00)
             while True:
@@ -650,19 +712,29 @@ class GameHookManager(QObject):
                     ev.text = clean_galgame_hook_text(ev.text, dedup=self.dedup_repeated)
                     if not ev.text:
                         continue
-                self._raw_event_signal.emit(ev)
+                try:
+                    self._raw_event_signal.emit(ev, generation)
+                except RuntimeError:
+                    return
 
         rc = proc.poll()
-        if not self._stop_flag.is_set():
-            self._process_exited_signal.emit(rc if rc is not None else -1)
+        if not self._stop_flag.is_set() and generation == self._generation:
+            try:
+                self._process_exited_signal.emit(rc if rc is not None else -1, generation)
+            except RuntimeError:
+                pass
 
-    def _on_process_exited(self, rc: int) -> None:
+    def _on_process_exited(self, rc: int, generation: int | None = None) -> None:
+        if generation is not None and generation != self._generation:
+            return
         self.console_logged.emit(f"[GalAnki] TextractorCLI 已結束 (code={rc})")
         self._attached_target = None
         self._proc = None
         self.hook_state_changed.emit(False, "Hook 已中斷")
 
-    def _on_hook_event_main_thread(self, ev: HookLineEvent) -> None:
+    def _on_hook_event_main_thread(self, ev: HookLineEvent, generation: int | None = None) -> None:
+        if generation is not None and generation != self._generation:
+            return
         name_lower = ev.hook_name.lower()
         if name_lower == "console":
             txt = ev.text.strip()
@@ -673,7 +745,7 @@ class GameHookManager(QObject):
                 if "inserting hook:" in low and self._attached_target:
                     hook_label = txt.split(":", 2)[-1].strip()
                     if any(kw in hook_label.lower() for kw in _PREFERRED_HOOK_KEYWORDS[:18]):
-                        new_label = f"🪝 {self._attached_target.name} ({hook_label})"
+                        new_label = f"{self._attached_target.name} ({hook_label})"
                         if new_label != self._last_status_label:
                             self._last_status_label = new_label
                             self.hook_state_changed.emit(True, new_label)
@@ -683,19 +755,21 @@ class GameHookManager(QObject):
             return
 
         key = ev.thread_key
-        prev = self._pending_buffers.get(key, "")
-        self._pending_buffers[key] = merge_hook_stream_chunks(
-            prev, ev.text, dedup=self.dedup_repeated
-        )
-
-        # 避免遊戲啟動瞬間產出數十條無關線程把記憶體與下拉選單灌爆
-        if key not in self._threads and len(self._threads) < 60:
+        # 避免遊戲啟動瞬間產出數十條無關線程把記憶體、計時器與下拉選單灌爆
+        if key not in self._threads:
+            if len(self._threads) >= 60:
+                return
             self._threads[key] = HookThreadInfo(
                 thread_key=key,
                 handle=ev.handle,
                 hook_name=ev.hook_name,
                 hook_code=ev.hook_code,
             )
+
+        prev = self._pending_buffers.get(key, "")
+        self._pending_buffers[key] = merge_hook_stream_chunks(
+            prev, ev.text, dedup=self.dedup_repeated
+        )
 
         timer = self._flush_timers.get(key)
         if timer is None:

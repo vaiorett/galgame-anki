@@ -17,7 +17,6 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from galgame_anki.core.dictionary import DictionaryEngine
-from galgame_anki.ui.theme import get_palette
 
 if TYPE_CHECKING:
     from galgame_anki.core.voice_pack import VoicePackManager
@@ -210,6 +209,8 @@ class WordAssociationTree:
 
     def to_panel_html(self, theme_name: str = "sakura") -> str:
         """輸出精簡聚焦的關聯詞 HTML（去雜訊：不堆疊次要詞頻與重複標籤）。"""
+        from galgame_anki.ui.theme import get_palette
+
         p = get_palette(theme_name)
         if self.is_empty():
             return (
@@ -225,7 +226,7 @@ class WordAssociationTree:
             rows: list[str] = []
             for n in nodes:
                 known_badge = (
-                    f'<span style="color:#059669; font-weight:700; font-size:11px;">✓ </span>'
+                    f'<span style="color:#059669; font-weight:500; font-size:11px;">✓ </span>'
                     if n.is_known
                     else ""
                 )
@@ -254,7 +255,7 @@ class WordAssociationTree:
             blocks.append(
                 f'<div style="margin-bottom:8px; padding:8px 10px; background:{p.bg_input}; '
                 f'border:1px solid {p.border}; border-radius:8px;">'
-                f'<div style="font-size:12px; font-weight:700; color:{p.accent_pink}; margin-bottom:4px;">{title}</div>'
+                f'<div style="font-size:12px; font-weight:500; color:{p.accent_pink}; margin-bottom:4px;">{title}</div>'
                 f"{''.join(rows)}</div>"
             )
 
@@ -283,7 +284,7 @@ class WordAssociationTree:
             blocks.append(
                 f'<div style="margin-bottom:4px; padding:8px 10px; background:{p.bg_input}; '
                 f'border:1px solid {p.border}; border-radius:8px;">'
-                f'<div style="font-size:12px; font-weight:700; color:{p.accent_pink}; margin-bottom:4px;">'
+                f'<div style="font-size:12px; font-weight:500; color:{p.accent_pink}; margin-bottom:4px;">'
                 f"劇本例句</div>"
                 f"{''.join(rec_rows)}</div>"
             )
@@ -340,56 +341,14 @@ class WordAssociationEngine:
             if self._index_ready:
                 return
             self._index_ready = True
-            try:
-                with self._dict._lock:
-                    rows = self._dict._conn.execute(
-                        """
-                        SELECT m.term, MIN(CAST(json_extract(m.data_json, '$.frequency') AS INT)) AS freq
-                        FROM term_meta m
-                        JOIN dictionaries d ON d.id = m.dict_id
-                        WHERE d.enabled = 1 AND m.mode = 'freq'
-                        GROUP BY m.term
-                        HAVING freq IS NOT NULL AND freq <= 35000
-                        ORDER BY freq ASC
-                        LIMIT 35000
-                        """
-                    ).fetchall()
-            except Exception:
-                rows = []
-
-            if rows:
-                for r in rows:
-                    term = str(r["term"] or "").strip()
-                    freq = int(r["freq"])
-                    if len(term) < 2 or len(term) > 8:
-                        continue
-                    self._top_terms.append((term, freq))
-                    for ch in set(_KANJI_RE.findall(term)):
-                        if len(self._kanji_index[ch]) < 80:
-                            self._kanji_index[ch].append((term, freq))
-                return
-
-            # 無 JPDB 詞頻表時（例如僅載入內建詞庫）從 terms 建輕量索引
-            try:
-                with self._dict._lock:
-                    t_rows = self._dict._conn.execute(
-                        """
-                        SELECT DISTINCT t.term FROM terms t
-                        JOIN dictionaries d ON d.id = t.dict_id
-                        WHERE d.enabled = 1 AND d.kind = 'bilingual'
-                        LIMIT 12000
-                        """
-                    ).fetchall()
-            except Exception:
-                t_rows = []
-            for idx, r in enumerate(t_rows, start=1):
-                term = str(r["term"] or "").strip()
+            rows = self._dict.get_top_freq_terms(max_freq=35000, limit=35000)
+            for term, freq in rows:
                 if len(term) < 2 or len(term) > 8:
                     continue
-                self._top_terms.append((term, idx))
+                self._top_terms.append((term, freq))
                 for ch in set(_KANJI_RE.findall(term)):
-                    if len(self._kanji_index[ch]) < 40:
-                        self._kanji_index[ch].append((term, idx))
+                    if len(self._kanji_index[ch]) < 80:
+                        self._kanji_index[ch].append((term, freq))
 
     def _summarize_term(
         self,
@@ -458,24 +417,11 @@ class WordAssociationEngine:
 
         # 同音異義詞（相同讀音、不同漢字寫法、依詞頻取最常見前 3 個）
         if clean_reading and len(clean_reading) >= 2:
-            try:
-                with self._dict._lock:
-                    h_rows = self._dict._conn.execute(
-                        """
-                        SELECT DISTINCT t.term FROM terms t
-                        JOIN dictionaries d ON d.id = t.dict_id
-                        WHERE d.enabled = 1 AND d.kind = 'bilingual'
-                          AND t.reading = ? AND t.term != ?
-                        LIMIT 28
-                        """,
-                        (clean_reading, clean_lemma),
-                    ).fetchall()
-            except Exception:
-                h_rows = []
+            raw_homophones = self._dict.query_homophones(clean_reading, exclude_term=clean_lemma, limit=28)
             h_terms = [
-                str(r["term"])
-                for r in h_rows
-                if _KANJI_RE.search(str(r["term"])) and str(r["term"]) not in seen_terms
+                ht
+                for ht in raw_homophones
+                if _KANJI_RE.search(ht) and ht not in seen_terms
             ]
             if h_terms:
                 h_freqs = self._dict.batch_lookup_frequencies(h_terms)
@@ -503,7 +449,7 @@ class WordAssociationEngine:
                         seen_terms.add(node.term)
                         seen_terms.add(ht)
 
-        # === 2. 常用複合詞／衍生片語（完整包含目前詞幹的高頻詞） ===
+        # === 2. 常用複合詞／衍生片語（完整包含目前原形或動詞連用詞幹的高頻詞） ===
         stem = clean_lemma[:-1] if (len(clean_lemma) >= 2 and re.match(r"^[ぁ-ん]$", clean_lemma[-1])) else clean_lemma
         comp_cands: list[tuple[str, int]] = []
         if len(stem) >= 2 or kanji_roots:
@@ -511,9 +457,9 @@ class WordAssociationEngine:
             if search_key:
                 pool = self._kanji_index.get(kanji_roots[0], []) if kanji_roots else self._top_terms
                 for term, freq in pool:
-                    if term in seen_terms or len(term) <= len(clean_lemma):
+                    if term in seen_terms or len(term) <= len(stem):
                         continue
-                    if clean_lemma in term:
+                    if clean_lemma in term or (len(stem) >= 2 and stem != clean_lemma and term.startswith(stem)):
                         comp_cands.append((term, freq))
         comp_cands.sort(key=lambda x: (0 if x[0] in known else 1, x[1], len(x[0])))
         for term, freq in comp_cands[:10]:
@@ -564,45 +510,17 @@ class WordAssociationEngine:
 
         # === 4. 同作品劇本重現句（防劇透：僅搜尋目前遊玩進度以內或最早期章節！） ===
         if self._voice_packs is not None and active_pack_id and len(clean_lemma) >= 2:
-            try:
-                with self._voice_packs._lock:
-                    cur_seq = int(self._voice_packs._cursors.get(active_pack_id, 0) or 0)
-                    if cur_seq > 0:
-                        rows = self._voice_packs._conn.execute(
-                            """
-                            SELECT scene_file, speaker, clean_text, translation
-                            FROM dialogue_lines
-                            WHERE pack_id = ? AND seq_index <= ? AND clean_text LIKE ?
-                              AND length(clean_text) BETWEEN 6 AND 55
-                            ORDER BY seq_index DESC
-                            LIMIT 8
-                            """,
-                            (active_pack_id, cur_seq, f"%{clean_lemma}%"),
-                        ).fetchall()
-                    else:
-                        rows = self._voice_packs._conn.execute(
-                            """
-                            SELECT scene_file, speaker, clean_text, translation
-                            FROM dialogue_lines
-                            WHERE pack_id = ? AND clean_text LIKE ?
-                              AND length(clean_text) BETWEEN 6 AND 55
-                            ORDER BY seq_index ASC
-                            LIMIT 8
-                            """,
-                            (active_pack_id, f"%{clean_lemma}%"),
-                        ).fetchall()
-            except Exception:
-                rows = []
+            rows = self._voice_packs.search_recurrences(active_pack_id, clean_lemma, limit=8)
             for r in rows:
-                txt = str(r["clean_text"] or "").strip()
+                txt = r.get("clean_text", "").strip()
                 if not txt or (current_sentence and txt in current_sentence):
                     continue
                 tree.game_recurrences.append(
                     GameRecurrenceLine(
-                        scene_file=str(r["scene_file"] or ""),
-                        speaker=str(r["speaker"] or ""),
+                        scene_file=r.get("scene_file", ""),
+                        speaker=r.get("speaker", ""),
                         text=txt,
-                        translation=str(r["translation"] or ""),
+                        translation=r.get("translation", ""),
                     )
                 )
                 if len(tree.game_recurrences) >= 2:

@@ -58,6 +58,7 @@ class AppConfig:
     ws_host: str = "127.0.0.1"
     ws_port: int = 6677
     clipboard_watch: bool = True
+    okular_companion_enabled: bool = False
     dedup_repeated_chars: bool = True
     ignore_non_japanese: bool = True
 
@@ -77,8 +78,8 @@ class AppConfig:
     mpv_fast_speed: float = 2.0
     mpv_auto_pause_sub_end: bool = False
 
-    # 單螢幕隱形伴讀（啟動收進系統匣、只留字幕覆蓋層）與二次元雙主題
-    start_in_tray_overlay: bool = True
+    # 啟動預設直接顯示主視窗，覆蓋層僅於手動開啟時顯示（勾選後才啟動即收進系統匣）
+    start_in_tray_overlay: bool = False
     ui_theme: str = "sakura"  # sakura (櫻霧輕透) | starlight (星夜琉璃)
     overlay_opacity: float = 0.90
     overlay_font_size: int = 23
@@ -93,6 +94,7 @@ class AppConfig:
     overlay_replace_mode: bool = True      # 預設開啟「遮蓋替換模式」：不透明蓋住遊戲原對話文字，不看 2 份字幕！
     overlay_backdrop: str = "vn_dark"      # vn_dark (深黑對話框) | vn_paper (暖白對話框) | cinema_black (純黑字幕條)
     overlay_text_align: str = "left"       # left (左對齊) | center (居中對齊)
+    overlay_blind_listen: bool = False     # 選用「先聽後看／盲聽模式」：預設關閉；開啟後隱藏台詞直到滑鼠懸停或按 ↺ 重聽
     overlay_guide_dismissed: bool = False
     first_run_completed: bool = False
 
@@ -106,8 +108,10 @@ class AppConfig:
         if not target.exists():
             return cls()
         try:
-            raw: dict[str, Any] = json.loads(target.read_text(encoding="utf-8"))
+            raw: Any = json.loads(target.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
+            return cls()
+        if not isinstance(raw, dict):
             return cls()
         valid_fields = {f.name for f in cls.__dataclass_fields__.values()}
         filtered = {k: v for k, v in raw.items() if k in valid_fields}
@@ -116,10 +120,10 @@ class AppConfig:
     def save(self, path: Path | None = None) -> Path:
         target = path or self.config_path()
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(
-            json.dumps(asdict(self), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        payload = json.dumps(asdict(self), ensure_ascii=False, indent=2)
+        tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+        tmp.write_text(payload, encoding="utf-8")
+        os.replace(tmp, target)
         return target
 
     def effective_dict_preference(self) -> str:

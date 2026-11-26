@@ -86,7 +86,7 @@ class FloatingUndoToast(QWidget):
             QLabel {{
                 color: {p.text_primary};
                 font-size: 13px;
-                font-weight: 600;
+                font-weight: 500;
                 background: transparent;
             }}
             QPushButton#UndoToastBtn {{
@@ -96,7 +96,7 @@ class FloatingUndoToast(QWidget):
                 border-radius: 8px;
                 padding: 0px 10px;
                 font-size: 12px;
-                font-weight: 700;
+                font-weight: 500;
             }}
             QPushButton#UndoToastBtn:hover {{
                 background-color: {p.accent_lilac};
@@ -108,7 +108,7 @@ class FloatingUndoToast(QWidget):
                 padding: 0px;
                 min-width: 20px;
                 font-size: 12px;
-                font-weight: 700;
+                font-weight: 500;
             }}
             QPushButton#UndoToastClose:hover {{
                 color: {p.accent_pink};

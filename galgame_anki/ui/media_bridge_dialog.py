@@ -46,8 +46,11 @@ class MediaBridgeDialog(QDialog):
         self.config = config
         self.mpv_bridge = mpv_bridge
         self._mpv_sub_hidden = False
+        self._backend = detect_mpv_backend()
 
         self._build_ui()
+        self.mpv_bridge.connection_changed.connect(self._on_mpv_connection_changed)
+        self._refresh_connection_ui(self.mpv_bridge.is_connected)
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -55,8 +58,8 @@ class MediaBridgeDialog(QDialog):
         layout.setSpacing(12)
 
         intro = QLabel(
-            "除了 Galgame 之外，GalAnki 的置頂覆蓋層也能直接讀取 <b>mpv 本地動畫／影片（支援 Flatpak io.mpv.Mpv）</b> "
-            "的日語字幕，並結合 <b>AJATT sub-transition（無字幕片段自動倍速）</b> 與 <b>多行合併製卡</b>！"
+            "除了 Galgame 之外，GalAnki 的置頂覆蓋層也能直接讀取 <span style='font-weight:500;'>mpv 本地動畫／影片（支援 Flatpak io.mpv.Mpv）</span> "
+            "的日語字幕，並結合 <span style='font-weight:500;'>AJATT sub-transition（無字幕片段自動倍速）</span> 與 <span style='font-weight:500;'>多行合併製卡</span>！"
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
@@ -68,18 +71,12 @@ class MediaBridgeDialog(QDialog):
         ml.setSpacing(9)
 
         mpv_title = QLabel("1️⃣ mpv 本地動畫／影片字幕連線（無損抽幀＋精準時間軸原聲）")
-        mpv_title.setStyleSheet("font-weight: 700; font-size: 14px; background: transparent;")
+        mpv_title.setStyleSheet("font-weight: 500; font-size: 14px; background: transparent;")
         ml.addWidget(mpv_title)
 
-        backend = detect_mpv_backend()
+        backend = self._backend
         mpv_ok = bool(backend["installed"])
-        conn_txt = "🟢 目前已有 mpv 連線中" if self.mpv_bridge.is_connected else "⚪ 等待 mpv 開啟影片"
-        inst_txt = (
-            f"✅ 已偵測到 {backend['label']}"
-            if mpv_ok
-            else "尚未安裝 mpv（Flatpak io.mpv.Mpv 或 sudo dnf install mpv）"
-        )
-        self.mpv_status = QLabel(f"狀態：{inst_txt}　｜　{conn_txt}")
+        self.mpv_status = QLabel("")
         self.mpv_status.setObjectName("MutedLabel")
         self.mpv_status.setWordWrap(True)
         ml.addWidget(self.mpv_status)
@@ -118,7 +115,7 @@ class MediaBridgeDialog(QDialog):
         il.setSpacing(8)
 
         imm_title = QLabel("2️⃣ AJATT 主動濃縮沉浸（無字幕自動快進 · 句尾自動暫停 · 單鍵重播）")
-        imm_title.setStyleSheet("font-weight: 700; font-size: 13.5px; background: transparent;")
+        imm_title.setStyleSheet("font-weight: 500; font-size: 13.5px; background: transparent;")
         il.addWidget(imm_title)
 
         spd_row = QHBoxLayout()
@@ -156,7 +153,7 @@ class MediaBridgeDialog(QDialog):
         il.addLayout(ctrl_row)
 
         ml_note = QLabel(
-            "💡 <b>多句字幕合併：</b>當動畫把一句完整台詞拆成兩條字幕時，點主視窗「➕ 合併上句」或覆蓋層「➕」（快捷鍵 <code>Ctrl+J</code>），"
+            "💡 <span style='font-weight:500;'>多句字幕合併：</span>當動畫把一句完整台詞拆成兩條字幕時，點主視窗「➕ 合併上句」或覆蓋層「➕」（快捷鍵 <code>Ctrl+J</code>），"
             "就會把前後兩句文字與影片原聲時間軸一次合併，切出完整不斷尾的 Anki 原聲！"
         )
         ml_note.setObjectName("MutedLabel")
@@ -216,6 +213,36 @@ class MediaBridgeDialog(QDialog):
             self.mpv_launched.emit()
         except Exception as exc:
             QMessageBox.warning(self, "啟動 mpv 失敗", str(exc))
+
+    def _refresh_connection_ui(self, connected: bool, detail: str = "") -> None:
+        mpv_ok = bool(self._backend["installed"])
+        inst_txt = (
+            f"已偵測到 {self._backend['label']}"
+            if mpv_ok
+            else "尚未安裝 mpv（Flatpak io.mpv.Mpv 或系統 mpv）"
+        )
+        conn_txt = detail or ("目前已連線至 mpv" if connected else "等待 mpv 開啟影片")
+        self.mpv_status.setText(f"狀態：{inst_txt}　｜　{conn_txt}")
+        self.toggle_live_sub_btn.setEnabled(connected)
+        self.replay_btn.setEnabled(connected)
+        self.pause_btn.setEnabled(connected)
+
+    def _on_mpv_connection_changed(self, connected: bool, msg: str) -> None:
+        self._refresh_connection_ui(connected, msg)
+
+    def _disconnect_bridge_signals(self) -> None:
+        try:
+            self.mpv_bridge.connection_changed.disconnect(self._on_mpv_connection_changed)
+        except (RuntimeError, TypeError):
+            pass
+
+    def done(self, result: int) -> None:  # noqa: N802
+        self._disconnect_bridge_signals()
+        super().done(result)
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        self._disconnect_bridge_signals()
+        super().closeEvent(event)
 
     def _toggle_live_mpv_sub(self) -> None:
         self._mpv_sub_hidden = not self._mpv_sub_hidden
